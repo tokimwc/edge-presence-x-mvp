@@ -65,5 +65,4 @@ npm install && pip install -r requirements.txt
 - ⏰ 24時間以内にMVP完成
 - 📱 GitHub + Devpost提出 (MIT License)
 - 🏆 AI Agent部門でのイノベーション評価
-```
 
