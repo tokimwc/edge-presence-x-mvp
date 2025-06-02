@@ -1,1 +1,2 @@
-google-cloud-speech 
+google-cloud-speech[async]
+PyAudio 
