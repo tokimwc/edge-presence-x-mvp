@@ -3,9 +3,11 @@ from google.cloud import speech_v1p1beta1 as speech # 非同期クライアン�
 import asyncio
 import pyaudio
 import logging # logging モジュールをインポート
+import os # 環境変数のために追加
 
-# PitchWorker をインポート
+# Worker をインポート
 from ..workers.pitch_worker import PitchWorker
+from ..workers.sentiment_worker import SentimentWorker # SentimentWorker をインポート
 
 # logging の基本設定 (モジュールレベルで１回だけ実行)
 # SpeechProcessor クラスの外で設定するのが一般的だよん！
@@ -26,32 +28,53 @@ SAMPLE_WIDTH = pyaudio.PyAudio().get_sample_size(FORMAT) # PyAudioからサン�
 
 class SpeechProcessor:
     def __init__(self):
-        # クラス内では、モジュールレベルで取得したロガーを使うか、
-        # self.logger = logging.getLogger(self.__class__.__name__) みたいにクラス専用ロガーを作ってもOK
-        # ここではモジュールレベルのloggerを使うね！
         self.speech_client = speech.SpeechAsyncClient()
         self.pyaudio_instance = pyaudio.PyAudio()
         self._audio_queue = asyncio.Queue()
         self._is_running = False
         self._microphone_task = None
         self._stop_event = asyncio.Event()
-        self.main_loop = asyncio.get_event_loop() # ← メインスレッドのループを保存
+        self.main_loop = asyncio.get_event_loop()
 
         # PitchWorker のインスタンスを作成
         try:
             self.pitch_worker = PitchWorker(
                 sample_rate=RATE,
                 channels=CHANNELS,
-                sample_width=SAMPLE_WIDTH, # PyAudioのFORMATから取得したサンプル幅を使用
-                # min_freq, max_freq, confidence_threshold はデフォルト値を使用
+                sample_width=SAMPLE_WIDTH,
             )
             logger.info("🎵 PitchWorker の初期化に成功しました。")
         except Exception as e:
             logger.exception("😱 PitchWorker の初期化中にエラーが発生しました。")
-            self.pitch_worker = None # エラー時はNoneに設定
+            self.pitch_worker = None
+
+        # SentimentWorker のインスタンスを作成
+        try:
+            # SYMBL_APP_ID と SYMBL_APP_SECRET は環境変数から読み込まれる想定
+            self.sentiment_worker = SentimentWorker(
+                on_emotion_callback=self._handle_emotion_data,
+                language_code="ja-JP" # 日本語に設定
+            )
+            logger.info("😊 SentimentWorker の初期化に成功しました。")
+        except ValueError as ve: # APIキー未設定などのValueErrorをキャッチ
+            logger.error(f"😱 SentimentWorker の初期化に失敗: {ve}")
+            self.sentiment_worker = None
+        except Exception as e:
+            logger.exception("😱 SentimentWorker の初期化中に予期せぬエラーが発生しました。")
+            self.sentiment_worker = None
 
         logger.info("✨ SpeechProcessor 初期化完了！✨")
         logger.info(f"PyAudio設定: FORMAT={FORMAT}, CHANNELS={CHANNELS}, RATE={RATE}, CHUNK={CHUNK}, SAMPLE_WIDTH={SAMPLE_WIDTH}")
+
+    def _handle_emotion_data(self, emotion_data: dict):
+        """
+        SentimentWorkerからの感情分析結果を処理するコールバック関数。
+        """
+        dominant_emotion = emotion_data.get("dominant_emotion", "N/A")
+        emotions = emotion_data.get("emotions", {})
+        # score を整形してログ出力
+        scores_str = ", ".join([f"{key}: {value:.2f}" for key, value in emotions.items()])
+        logger.info(f"😊 感情分析結果: 主な感情={dominant_emotion} (スコア: {scores_str if scores_str else 'N/A'}) テキスト: '{emotion_data.get("text_processed", "")[:50]}...'")
 
     async def _microphone_stream_generator(self):
         """
@@ -72,37 +95,16 @@ class SpeechProcessor:
 
         while self._is_running and not self._stop_event.is_set():
             try:
-                # asyncio.Queueから音声チャンクを取得 (タイムアウト付き)
                 chunk = await asyncio.wait_for(self._audio_queue.get(), timeout=0.1)
-                if chunk is None: # 停止の合図
+                if chunk is None: 
                     break
-                
-                # Speech-to-Text API にチャンクを送信
                 yield speech.StreamingRecognizeRequest(audio_content=chunk)
-
-                # PitchWorker でピッチを解析 (同期的に呼び出す)
-                if self.pitch_worker and chunk:
-                    try:
-                        # TODO: analyze_pitch がCPU負荷が高い場合、
-                        # loop = asyncio.get_event_loop()
-                        # pitch_hz = await loop.run_in_executor(None, self.pitch_worker.analyze_pitch, chunk)
-                        # のように別スレッドで実行することを検討
-                        pitch_hz = self.pitch_worker.analyze_pitch(chunk)
-                        pitch_log_msg = f"{pitch_hz:.2f} Hz" if pitch_hz is not None else "N/A"
-                        # 文字起こしログとピッチログをまとめて出力しないように、ピッチはDEBUGレベルにすることも検討
-                        # logger.info(f"🎵 推定ピッチ: {pitch_log_msg}") # 個別のINFOログは冗長になる可能性
-                    except Exception as e:
-                        logger.error(f"😱 PitchWorker でのピッチ解析中にエラー: {e}")
-                        # pitch_log_msg = "Error" # エラー時は特定の値にするなど
-            
             except asyncio.TimeoutError:
-                # タイムアウトの場合は何もしないでループを続ける (まだ音声が来てないだけかも)
                 continue
             except Exception as e:
-                logger.exception("😱 _microphone_stream_generator で予期せぬエラー") # logger.exception でスタックトレースも記録
+                logger.exception("😱 _microphone_stream_generator で予期せぬエラー")
                 break
         logger.info("🎤 _microphone_stream_generator 終了")
-
 
     def _microphone_worker(self):
         """
@@ -124,11 +126,6 @@ class SpeechProcessor:
                     data = stream.read(CHUNK, exception_on_overflow=False)
                     data_counter += 1
                     
-                    # ピッチ解析結果をここでログに出すか検討。ただし、_microphone_stream_generator 内の方が
-                    # Speech APIへの送信とタイミングが近いため、そちらで処理するのが自然か。
-                    # ここでピッチ解析を行うと、Speech APIへの送信チャンクとピッチ解析対象チャンクが同じになる保証がある。
-                    # 今回は _microphone_stream_generator に任せる。
-                    
                     log_pitch_str = "N/A"
                     if self.pitch_worker and data:
                         try:
@@ -143,7 +140,11 @@ class SpeechProcessor:
                     
                     asyncio.run_coroutine_threadsafe(self._audio_queue.put(data), self.main_loop)
                 except IOError as e:
-                    logger.warning(f"🎤 PyAudio readエラー (たぶんオーバーフロー): {e}") # Warningレベルでいいかも
+                    logger.warning(f"🎤 PyAudio readエラー (たぶんオーバーフロー): {e}") 
+                    asyncio.run_coroutine_threadsafe(asyncio.sleep(0.01), self.main_loop)
+                except Exception as e:
+                    logger.exception(f"😱 _microphone_workerの内部ループで予期せぬエラー: {e}")
+                    # ループを継続するために ചെറിയ待機時間を設けることも検討
                     asyncio.run_coroutine_threadsafe(asyncio.sleep(0.01), self.main_loop)
 
             logger.info("🎙️ マイクストリームループ終了。ストリーム停止処理へ...")
@@ -152,13 +153,10 @@ class SpeechProcessor:
             logger.info("🎙️ マイクストリーム正常終了。")
         except Exception as e:
             logger.exception("😱 _microphone_workerで致命的なエラー")
-            # エラーが発生した場合もキューにNoneを送ってジェネレータを終了させる
         finally:
-            if self._is_running: # まだ動いてるなら終了処理
-                 # 保存しておいたメインループを使う！
+            if self._is_running: 
                  logger.info("_microphone_worker の finally でキューにNoneを送信")
                  asyncio.run_coroutine_threadsafe(self._audio_queue.put(None), self.main_loop)
-
 
     async def start_realtime_transcription_from_mic(self):
         """
@@ -171,13 +169,24 @@ class SpeechProcessor:
         logger.info("🚀リアルタイム文字起こし開始準備...")
         self._is_running = True
         self._stop_event.clear()
-        # キューをクリア
         while not self._audio_queue.empty():
             self._audio_queue.get_nowait()
 
+        # SentimentWorker を開始 (もしあれば)
+        if self.sentiment_worker:
+            logger.info("😊 SentimentWorkerを開始します...")
+            try:
+                # SentimentWorkerのstartは非同期なのでawaitする
+                success = await self.sentiment_worker.start()
+                if success:
+                    logger.info("😊 SentimentWorkerが正常に開始されました。")
+                else:
+                    logger.error("😱 SentimentWorkerの開始に失敗しました。以降の感情分析は行われません。")
+                    # self.sentiment_worker = None # 開始失敗したら無効化も検討
+            except Exception as e:
+                logger.exception("😱 SentimentWorkerのstart呼び出し中にエラーが発生しました。")
+                # self.sentiment_worker = None
 
-        # マイクワーカースレッドを開始
-        # asyncio.to_thread を使って、同期的な _microphone_worker を別スレッドで実行
         loop = asyncio.get_event_loop()
         self._microphone_task = loop.run_in_executor(None, self._microphone_worker)
         logger.info("🎧 マイクワーカースレッド開始！")
@@ -187,7 +196,7 @@ class SpeechProcessor:
                 requests=self._microphone_stream_generator()
             )
             async for response in responses:
-                if not self._is_running: break # 停止リクエストがあったら抜ける
+                if not self._is_running: break
 
                 if not response.results:
                     continue
@@ -197,27 +206,21 @@ class SpeechProcessor:
                 transcript = result.alternatives[0].transcript
                 
                 if result.is_final:
-                    # 最終結果のログにピッチ情報を含めるか検討。
-                    # ただし、ピッチ情報はチャンクごとなので、最終結果のタイミングとは必ずしも一致しない。
-                    # ここでは文字起こし結果のみにフォーカス。
                     logger.info(f"✨ 最終結果キタコレ！: {transcript}")
-                    yield transcript # 最終結果を返す
+                    # 最終結果テキストをSentimentWorkerに送信
+                    if self.sentiment_worker and self.sentiment_worker._is_running and transcript:
+                        logger.debug(f"感情分析のためにテキスト送信: '{transcript}'")
+                        # send_text_for_analysis は非同期メソッドなので create_task でノンブロッキングに実行
+                        asyncio.create_task(self.sentiment_worker.send_text_for_analysis(transcript))
+                    yield transcript 
                 else:
-                    # 途中結果のログにピッチ情報を含める。
-                    # _microphone_stream_generator で取得したピッチ情報をどうやってここまで持ってくるか？
-                    # 現状の実装では、_microphone_stream_generator のループ内で Speech API への送信とピッチ解析を
-                    # 行っているが、その結果をこの response ループまで伝えるのは少し複雑になる。
-                    # 一旦、_microphone_worker 側で DEBUG レベルでピッチをログ出力し、
-                    # Speech API レスポンス側では文字起こし結果のみを INFO でログ出力する方針とする。
                     logger.info(f"📝 途中結果: {transcript}")
-                    # 途中結果も必要ならここで yield transcript とかできるよ！
 
         except Exception as e:
             logger.exception("😱 start_realtime_transcription_from_mic 内の streaming_recognize ループでエラー")
         finally:
-            logger.info("🛑 文字起こし処理ループ終了。stop_realtime_transcription_from_mic を呼び出すよん！")
-            # await self.stop_realtime_transcription_from_mic() # ここをコメントアウト！呼び出し元でやる！
-
+            logger.info("🛑 文字起こし処理ループ終了。stop_realtime_transcription_from_mic を呼び出す準備...")
+            # await self.stop_realtime_transcription_from_mic() # 呼び出し元でやる！
 
     async def stop_realtime_transcription_from_mic(self):
         """
@@ -229,13 +232,21 @@ class SpeechProcessor:
 
         logger.info("⏳ リアルタイム文字起こし停止処理開始...")
         self._is_running = False
-        self._stop_event.set() # ワーカーとジェネレータに停止を通知
+        self._stop_event.set()
+
+        # SentimentWorker を停止 (もしあれば)
+        if self.sentiment_worker and self.sentiment_worker._is_running:
+            logger.info("😊 SentimentWorkerを停止します...")
+            try:
+                # SentimentWorkerのstopは非同期なのでawaitする
+                await self.sentiment_worker.stop()
+                logger.info("😊 SentimentWorkerが正常に停止されました。")
+            except Exception as e:
+                logger.exception("😱 SentimentWorkerのstop呼び出し中にエラーが発生しました。")
 
         if self._microphone_task is not None:
             logger.info("🎤 マイクワーカースレッドの終了待ち...")
             try:
-                # キューにNoneを入れてワーカー内のreadループを安全に抜けさせる試み
-                # (既に入っているかもしれないが念のため)
                 await asyncio.wait_for(self._audio_queue.put(None), timeout=1.0)
             except asyncio.TimeoutError:
                 logger.warning("audio_queue.put(None) タイムアウト (stop時)")
@@ -243,7 +254,7 @@ class SpeechProcessor:
                  logger.error(f"audio_queue.put(None) でエラー (stop時): {e}")
 
             try:
-                await asyncio.wait_for(self._microphone_task, timeout=5.0) # タイムアウト付きで待つ
+                await asyncio.wait_for(self._microphone_task, timeout=5.0)
                 logger.info("🎤 マイクワーカースレッド正常終了！")
             except asyncio.TimeoutError:
                 logger.warning("🔥 マイクワーカースレッドの終了タイムアウト！")
@@ -251,7 +262,6 @@ class SpeechProcessor:
                 logger.error(f"🔥 マイクワーカースレッド終了時にエラー: {e}")
             self._microphone_task = None
         
-        # キューに残っているかもしれないデータをクリア
         while not self._audio_queue.empty():
             try:
                 self._audio_queue.get_nowait()
@@ -268,63 +278,62 @@ class SpeechProcessor:
             logger.info("💨 PyAudioインスタンスを解放します...")
             self.pyaudio_instance.terminate()
             logger.info("💨 PyAudioインスタンス解放完了！")
+        # SentimentWorkerのaiohttpセッションもここで確実に閉じることを検討
+        # ただし、非同期のstopメソッドで処理するのが望ましい
+        # if hasattr(self, 'sentiment_worker') and self.sentiment_worker:
+        #     if hasattr(self.sentiment_worker, '_aiohttp_session') and self.sentiment_worker._aiohttp_session:
+        #         if not self.sentiment_worker._aiohttp_session.closed:
+        #             # 非同期メソッドを __del__ から呼ぶのは難しいので、通常は stop で処理すべき
+        #             logger.warning("SentimentWorkerのaiohttpセッションが __del__ でまだ開いています。プログラム終了前にstopを呼んでください。")
 
 
 async def main():
-    # logger.info に変更
-    logger.info("🚀 メイン処理開始！ SpeechProcessorのテストだよん！")
     # logger.setLevel(logging.DEBUG) # デバッグログも見たい場合は、ここで一時的にレベル変更！
+    logger.info("🚀 メイン処理開始！ SpeechProcessorのテストだよん！")
+    
+    # 環境変数 SYMBL_APP_ID と SYMBL_APP_SECRET が設定されているか確認
+    if not os.getenv("SYMBL_APP_ID") or not os.getenv("SYMBL_APP_SECRET"):
+        logger.warning("⚠️ 環境変数 SYMBL_APP_ID または SYMBL_APP_SECRET が設定されていません。感情分析はスキップされます。")
+        # この場合、SentimentWorkerの初期化は失敗するが、プログラムは続行可能
+
     processor = SpeechProcessor()
 
     try:
-        # logger.info に変更
-        logger.info("マイクからの文字起こしを開始します (約10秒間)...")
-        # start_realtime_transcription_from_mic は非同期ジェネレータなので、
-        # async for で結果を処理するよん
-        async def transcribe_task():
+        logger.info("マイクからの文字起こしを開始します (約20秒間)...")
+        
+        async def transcribe_task_wrapper():
+            # transcribe_task内からprocessorの状態を参照できるようにする
+            nonlocal processor 
             async for transcript in processor.start_realtime_transcription_from_mic():
-                # logger.info に変更
-                logger.info(f"📢 メイン受信 (最終結果): {transcript}")
-                if not processor._is_running: # stopが呼ばれたら抜ける
+                # logger.info(f"📢 メイン受信 (最終結果): {transcript}") # これは SpeechProcessor 側でログ出力
+                if not processor._is_running: 
                     break
         
-        transcription_coro = transcribe_task()
+        transcription_coro = transcribe_task_wrapper()
+        main_task = asyncio.create_task(transcription_coro)
         
-        # 10秒後に停止するタスク
-        stoppable_task = asyncio.create_task(transcription_coro)
-        
-        await asyncio.sleep(10) # 10秒間実行
-        # logger.info に変更 (改行文字を削除)
-        logger.info("⏳ 10秒経過、文字起こしを停止します...")
+        await asyncio.sleep(20) # 20秒間実行
+        logger.info("\n⏳ 20秒経過、文字起こしを停止します...\n")
         
     except KeyboardInterrupt:
-        # logger.info に変更 (改行文字を削除)
-        logger.info("🛑 Ctrl+C を検知！処理を中断します...")
+        logger.info("\n🛑 Ctrl+C を検知！処理を中断します...")
     except Exception as e:
-        # logger.exception に変更してスタックトレースも出力
         logger.exception(f"😱 メイン処理で予期せぬエラー: {e}")
     finally:
-        # logger.info に変更
         logger.info("🧹 クリーンアップ処理開始...")
         if hasattr(processor, '_is_running') and processor._is_running:
              await processor.stop_realtime_transcription_from_mic()
+        
         # PyAudioインスタンスの解放は __del__ に任せるか、明示的に呼ぶ
         if hasattr(processor, 'pyaudio_instance') and processor.pyaudio_instance:
-             processor.pyaudio_instance.terminate() # 明示的に呼んでおく
-        # logger.info に変更
+             processor.pyaudio_instance.terminate() 
         logger.info("👋 メイン処理完了！またね～！")
 
 
 if __name__ == "__main__":
-    # Google Cloud の認証情報が設定されてないとここでエラーになるかも！
-    # 環境変数 GOOGLE_APPLICATION_CREDENTIALS を設定するか、
-    # gcloud auth application-default login を実行してね！
     try:
         asyncio.run(main())
     except Exception as e:
-        # logger.exception に変更してスタックトレースも出力
         logger.exception(f"😱 asyncio.runでエラー発生！: {e}")
-        # logger.error に変更
         logger.error("💡 もしかして: Google Cloud の認証設定してないとか？")
-        # logger.error に変更
         logger.error("   gcloud auth application-default login とか試してみてね！") 
