@@ -1,0 +1,32 @@
+# EP-X Google Cloud Platform 設定
+project_id: "ep-x-ai-coach-mvp"
+region: "us-central1"
+
+# Speech-to-Text設定
+speech_to_text:
+  model: "latest_long"
+  language_code: "ja-JP"
+  encoding: "WEBM_OPUS"
+  sample_rate: 24000
+  enable_automatic_punctuation: true
+  max_alternatives: 3
+
+# Vertex AI設定
+vertex_ai:
+  location: "us-central1"
+  model: "gemini-1.5-pro"
+  max_tokens: 32768
+  temperature: 0.3
+
+# Cloud Run設定
+cloud_run:
+  service_name: "ep-x-speech-processor"
+  memory: "2Gi"
+  cpu: "2"
+  max_instances: 100
+  concurrency: 80
+
+# Firestore設定
+firestore:
+  database: "(default)"
+  collection_prefix: "ep_x_"

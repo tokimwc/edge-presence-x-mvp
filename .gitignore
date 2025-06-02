@@ -1,0 +1,335 @@
+# =====================
+# 🤖 Cursor AI エディタ関連
+# =====================
+.cursor/
+.cursorrules
+.cursor-settings.json
+.ai-conversation-history/
+*.cursor-log
+.cursor-tutor/
+
+# =====================
+# 📝 .specstory 関連
+# =====================
+.specstory/
+*.specstory
+.spec-cache/
+spec-stories.json
+.story-sessions/
+
+# =====================
+# 🔐 Google Cloud & 認証情報
+# =====================
+# GCP サービスアカウントキー
+*.json
+!package.json
+!tsconfig.json
+!config/gcp-config-template.json
+gcp-key.json
+google-cloud-key.json
+service-account.json
+.google-cloud/
+.gcloud/
+
+# 環境変数ファイル
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+.env.*.local
+
+# GCP Terraform状態ファイル
+terraform.tfstate
+terraform.tfstate.backup
+.terraform/
+*.tfplan
+
+# =====================
+# 🎤 音声処理 & PyAudio関連
+# =====================
+# 一時音声ファイル
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+*.webm
+*.opus
+audio-temp/
+recordings/
+temp-audio/
+
+# 音声解析キャッシュ
+pitch-cache/
+*.pitch
+voice-models/
+audio-features.json
+
+# PyAudio一時ファイル
+*.pyaudio
+portaudio-logs/
+
+# =====================
+# 🐍 Python関連
+# =====================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# =====================
+# 🌐 Node.js & Vue.js関連
+# =====================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+
+# Dependency directories
+jspm_packages/
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# dotenv environment variable files
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Stores VSCode versions used for testing VSCode extensions
+.vscode-test
+
+# yarn v2
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+# =====================
+# 🖥️ OS関連
+# =====================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.tmp
+*.temp
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# =====================
+# 🧠 AI/ML & データ関連
+# =====================
+# Vertex AI キャッシュ
+.vertex-ai-cache/
+vertex-models/
+*.pkl
+*.joblib
+
+# Gemini関連キャッシュ
+.gemini-cache/
+gemini-conversations/
+
+# Training data
+training-data/
+datasets/
+*.csv
+*.parquet
+!sample-data.csv
+
+# Model files
+*.h5
+*.pb
+*.onnx
+saved_models/
+
+# TensorBoard logs
+logs/
+runs/
+
+# =====================
+# 📊 BigQuery & Analytics
+# =====================
+bigquery-cache/
+*.bq
+query-results/
+analytics-temp/
+
+# =====================
+# 🔧 開発ツール関連
+# =====================
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime directories
+.cache/
+.tmp/
+temp/
+tmp/
+
+# =====================
+# 🚀 デプロイ & CI/CD関連
+# =====================
+# Cloud Build
+cloudbuild.yaml.backup
+.cloudbuild/
+
+# Docker
+Dockerfile.backup
+docker-compose.override.yml
+
+# Deployment artifacts
+deployment-artifacts/
+*.zip
+*.tar.gz
+
+# =====================
+# 📋 EP-X固有の一時ファイル
+# =====================
+# STAR評価キャッシュ
+star-evaluations/
+evaluation-cache/
+
+# 感情分析結果
+emotion-data/
+sentiment-cache/
+
+# WebRTC関連
+webrtc-logs/
+rtc-temp/
+
+# セッションデータ
+sessions/
+user-sessions/
+interview-recordings/
+
+# 開発用テストファイル
+test-interviews/
+mock-data/
+dev-samples/
+
+# =====================
+# 🎯 ハッカソン固有
+# =====================
+# プレゼン資料（公開版以外）
+presentation-drafts/
+demo-videos/
+*.pptx
+*.key
+
+# 競合分析資料
+competitor-analysis/
+research-notes/
