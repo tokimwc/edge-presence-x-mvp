@@ -1,2 +1,14 @@
-google-cloud-speech[async]
-PyAudio 
+google-cloud-speech
+# google-cloud-storage # 必要であればコメントアウト解除
+pyaudio
+# websockets # Symbl.ai連携で使ってたけど、Google NL APIなら不要
+# aiohttp # Symbl.ai連携で使ってたけど、Google NL APIなら不要
+google-cloud-language # Google Cloud Natural Language API のために追加
+# numpy # PitchWorkerで使ってるかも？状況に応じて
+# scipy # PitchWorkerで使ってるかも？状況に応じて
+# python-dotenv # .envファイル読み込みたい場合
+
+# 以下は開発・リンティング用（本番環境には不要な場合もある）
+# pylint
+# autopep8
+# flake8 

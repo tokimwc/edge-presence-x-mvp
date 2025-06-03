@@ -14,22 +14,23 @@ EP-Xは、Google Cloud AI技術を活用したリアルタイム面接練習シ�
 - 🎤 **リアルタイム音声解析** - Cloud Speech-to-Text gRPC (300ms以下レイテンシ)
 - 🧠 **AI評価システム** - Vertex AI Gemini 1.5 + LLM-as-Judge
 - 📊 **STAR手法評価** - Situation, Task, Action, Result構造分析
-- 💭 **感情分析** - Symbl.ai WebSocket + リアルタイム感情認識
+- 💭 **感情分析** - Google Cloud Natural Language API + リアルタイム感情認識
 - 📈 **音程解析** - PyAudio autocorrelation による声のトーン分析
 - 📋 **総合評価** - 自信度・構造性・感情表現の3軸スコアリング
 
 ## 🏗️ システムアーキテクチャ
 
-```
+```mermaid
 graph TD
     Browser[🌐 ブラウザ] --WebRTC--> CloudRun[☁️ Cloud Run Edge]
     CloudRun --PubSub--> STT[🎤 Speech-to-Text]
     STT --gRPC--> VertexAI[🧠 Vertex AI Audio]
     CloudRun --Stream--> PitchWorker[🎵 Pitch Worker]
+    STT --> NL_API[💬 Google Cloud Natural Language API]
     STT & PitchWorker --> Fusion[⚡ Fusion Function]
     Fusion --> Gemini[💎 Gemini 1.5 Judge]
-    Fusion --WebSocket--> Sentiment[💭 Symbl Sentiment]
-    Gemini & Sentiment --> Firestore[🗃️ Firestore]
+    NL_API --> Fusion
+    Gemini --> Firestore[🗃️ Firestore]
     Firestore --> VueUI[🖥️ Vue.js UI]
 ```
 

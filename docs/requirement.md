@@ -4,7 +4,7 @@
 
 ## 概要（Executive Summary）
 
-近年、Otter AI AgentやLinkedIn面接準備機能など「会話ストリームを解析し即時助言する」ソリューションが台頭しつつありますが ([The Verge](https://www.theverge.com/news/635176/otter-ai-voice-activated-meeting-agent-availability?utm_source=chatgpt.com))([The Verge][1]) ([LinkedIn][2])、生成AIで“声質・論理・印象”を一気通貫で補正する実践的コーチは未だ稀です。提案する **PitchPerfect-AI** は Google Cloud の Vertex AI Agent Builder、Speech-to-Text Streaming、Natural Language API 等を連携し、面接中の音声データを 300 ms 以内で解析・提示。ピッチの高騰、WPM（Words Per Minute）の逸脱、フィラー（えー、あのー）検出、論理構造の薄さを即座にダッシュボードへ赤信号表示し、「シニア即戦力」相当のプレゼンスへ導きます。
+近年、Otter AI AgentやLinkedIn面接準備機能など「会話ストリームを解析し即時助言する」ソリューションが台頭しつつありますが ([The Verge](https://www.theverge.com/news/635176/otter-ai-voice-activated-meeting-agent-availability?utm_source=chatgpt.com))([The Verge][1]) ([LinkedIn][2])、生成AIで"声質・論理・印象"を一気通貫で補正する実践的コーチは未だ稀です。提案する **PitchPerfect-AI** は Google Cloud の Vertex AI Agent Builder、Speech-to-Text Streaming、Natural Language API 等を連携し、面接中の音声データを 300 ms 以内で解析・提示。ピッチの高騰、WPM（Words Per Minute）の逸脱、フィラー（えー、あのー）検出、論理構造の薄さを即座にダッシュボードへ赤信号表示し、「シニア即戦力」相当のプレゼンスへ導きます。
 
 ---
 
@@ -23,9 +23,9 @@
 
 1. **音声系エージェント**が ピッチ・WPM・フィラーカウントを時系列ストリームで算出。
 2. **内容系エージェント**が LLM（Gemini 1.5 Flash）で STAR/SCQA 構造を即時採点。
-3. **パーソナリティエージェント**が 「落ち着いた低音・ 2 秒ポーズ」など行動指示を返却。
+3. **パーソナリティエージェント**が Google Cloud Natural Language API で感情を分析し、「落ち着いた低音・ 2 秒ポーズ」など行動指示を返却。
 
-結果を Flutter Web UI 上で三色信号と改善提案カードとして点灯し、Zoom/Meet の隣に PIP 表示。面接者は視線をずらさずに“今”の課題を把握・修正できます。
+結果を Flutter Web UI 上で三色信号と改善提案カードとして点灯し、Zoom/Meet の隣に PIP 表示。面接者は視線をずらさずに"今"の課題を把握・修正できます。
 
 ---
 
@@ -50,7 +50,7 @@
 ### 4.2 コンテンツ構造評価
 
 * Vertex AI Generative Models へ逐次転写をウィンドウ送信し、 STAR/SCQA 構造欠落を指摘 ([Google Cloud][9])。
-* Natural Language API で感情極性・主語抜けを抽出 ([Google Cloud][10])。
+* Google Cloud Natural Language API で感情極性・主語抜けを抽出 ([Google Cloud][10])。
 
 ### 4.3 ダッシュボード & フィードバック
 
@@ -84,6 +84,7 @@
    * Cloud Run (AI) コンテナ内で Pipecat フレームワークがマルチモーダルStreamを分配 ([GitHub][12])。
    * Speech API → Transcriber Agent → Pub/Sub
    * Librosa/Shennong → Paralinguistic Agent
+   * Google Cloud Natural Language API → Sentiment Agent (感情分析スコアを提供)
    * Vertex AI Agent Builder Orchestrator が最終 Advice JSON を組成 ([Google Cloud][9])。
 3. **データストア** : Firestore (Session Logs) ＆ BigQuery (匿名統計)。
 4. **外部統合** : Meet/Zoom Overlay は Chrome Extension (WebSocket)。
@@ -97,6 +98,7 @@
 | **Transcriber**      | 音声→テキスト       | Speech-to-Text Streaming v2 ([Google Cloud][5]) |
 | **Pitch-Tracker**    | f0・WPM・フィラー   | Librosa + PodcastFillers fine-tune ([arXiv][4]) |
 | **Content-Critic**   | STAR/SCQA スコア | Gemini Flash 32k context                        |
+| **Sentiment-Analyzer** | 感情分析        | Google Cloud Natural Language API ([Google Cloud][10]) |
 | **Persona-Coach**    | 行動指示・TTS      | Gemini + Cloud TTS                              |
 | **Session-Reporter** | 要約 & PDF      | Vertex AI Text + Google Docs API                |
 

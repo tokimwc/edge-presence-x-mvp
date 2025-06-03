@@ -5,9 +5,19 @@ import pyaudio
 import logging # logging モジュールをインポート
 import os # 環境変数のために追加
 
-# Worker をインポート
-from ..workers.pitch_worker import PitchWorker
-from ..workers.sentiment_worker import SentimentWorker # SentimentWorker をインポート
+# --- Pythonのモジュール検索パスにsrcディレクトリを追加 ---
+import sys
+# speech_processor.py のあるディレクトリ (src/backend/services)
+_CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+# src ディレクトリの絶対パス (src/backend/services -> src/backend -> src)
+_SRC_DIR = os.path.abspath(os.path.join(_CURRENT_FILE_DIR, '..', '..'))
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+# --- ここまで ---
+
+# Worker をインポート (相対パスからsrcを基準とした絶対パス風に変更)
+from backend.workers.pitch_worker import PitchWorker
+from backend.workers.sentiment_worker import SentimentWorker # SentimentWorker をインポート
 
 # logging の基本設定 (モジュールレベルで１回だけ実行)
 # SpeechProcessor クラスの外で設定するのが一般的だよん！
@@ -50,17 +60,14 @@ class SpeechProcessor:
 
         # SentimentWorker のインスタンスを作成
         try:
-            # SYMBL_APP_ID と SYMBL_APP_SECRET は環境変数から読み込まれる想定
+            # Google Cloud Natural Language API を使うので、APIキーは環境変数 GOOGLE_APPLICATION_CREDENTIALS で設定されてる前提だよん！
             self.sentiment_worker = SentimentWorker(
                 on_emotion_callback=self._handle_emotion_data,
-                language_code="ja-JP" # 日本語に設定
+                language_code="ja" # Google Cloud NL API は "ja" を使うよ！
             )
-            logger.info("😊 SentimentWorker の初期化に成功しました。")
-        except ValueError as ve: # APIキー未設定などのValueErrorをキャッチ
-            logger.error(f"😱 SentimentWorker の初期化に失敗: {ve}")
-            self.sentiment_worker = None
-        except Exception as e:
-            logger.exception("😱 SentimentWorker の初期化中に予期せぬエラーが発生しました。")
+            logger.info("😊 SentimentWorker (Google Cloud NL API版) の初期化に成功しました。")
+        except Exception as e: # SentimentWorker内でクライアント初期化エラーもキャッチできるように汎用的なExceptionに
+            logger.exception("😱 SentimentWorker (Google Cloud NL API版) の初期化中にエラーが発生しました。")
             self.sentiment_worker = None
 
         logger.info("✨ SpeechProcessor 初期化完了！✨")
@@ -69,12 +76,17 @@ class SpeechProcessor:
     def _handle_emotion_data(self, emotion_data: dict):
         """
         SentimentWorkerからの感情分析結果を処理するコールバック関数。
+        Google Cloud Natural Language API の結果に合わせて調整したよん！
         """
-        dominant_emotion = emotion_data.get("dominant_emotion", "N/A")
-        emotions = emotion_data.get("emotions", {})
-        # score を整形してログ出力
-        scores_str = ", ".join([f"{key}: {value:.2f}" for key, value in emotions.items()])
-        logger.info(f"😊 感情分析結果: 主な感情={dominant_emotion} (スコア: {scores_str if scores_str else 'N/A'}) テキスト: '{emotion_data.get("text_processed", "")[:50]}...'")
+        # Natural Language API からは score と magnitude がメインで返ってくる
+        score = emotion_data.get("emotions", {}).get("score")
+        magnitude = emotion_data.get("emotions", {}).get("magnitude")
+        text_processed = emotion_data.get("text_processed", "")
+
+        if score is not None and magnitude is not None:
+            logger.info(f"😊 感情分析結果 (Google NL): スコア={score:.2f}, 強さ={magnitude:.2f} (テキスト: '{text_processed[:50]}...')")
+        else:
+            logger.warning(f"🤔 感情分析結果が不完全です: {emotion_data}")
 
     async def _microphone_stream_generator(self):
         """
@@ -291,10 +303,12 @@ async def main():
     # logger.setLevel(logging.DEBUG) # デバッグログも見たい場合は、ここで一時的にレベル変更！
     logger.info("🚀 メイン処理開始！ SpeechProcessorのテストだよん！")
     
-    # 環境変数 SYMBL_APP_ID と SYMBL_APP_SECRET が設定されているか確認
-    if not os.getenv("SYMBL_APP_ID") or not os.getenv("SYMBL_APP_SECRET"):
-        logger.warning("⚠️ 環境変数 SYMBL_APP_ID または SYMBL_APP_SECRET が設定されていません。感情分析はスキップされます。")
-        # この場合、SentimentWorkerの初期化は失敗するが、プログラムは続行可能
+    # 環境変数 GOOGLE_APPLICATION_CREDENTIALS が設定されているか確認
+    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        logger.warning("⚠️ 環境変数 GOOGLE_APPLICATION_CREDENTIALS が設定されていません。")
+        logger.warning("   Google Cloud Natural Language API の認証に失敗し、感情分析が機能しない可能性があります。")
+        logger.warning("   設定例: export GOOGLE_APPLICATION_CREDENTIALS=\"/path/to/your/keyfile.json\"")
+        # SentimentWorkerの初期化は language_client が None になるだけで、エラーにはならないはずだから処理は続行
 
     processor = SpeechProcessor()
 

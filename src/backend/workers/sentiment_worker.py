@@ -12,322 +12,206 @@ import uuid
 import websockets
 import aiohttp
 from typing import Callable, Dict, Any, Optional
+from google.cloud import language_v1
+from google.cloud.language_v1.types import Document # type_ の代わりに Document.Type を使えるように
+import sys # 環境変数のために追加
 
-# モジュールレベルのロギング設定 (アプリケーション全体で設定推奨)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(name)s - %(module)s - %(funcName)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+# --- Pythonのモジュール検索パスにsrcディレクトリを追加 ---
+# この部分は speech_processor.py と同じ構造なので、必要に応じて調整してね！
+# sentiment_worker.py のあるディレクトリ (src/backend/workers)
+_CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+# src ディレクトリの絶対パス (src/backend/workers -> src/backend -> src)
+_SRC_DIR = os.path.abspath(os.path.join(_CURRENT_FILE_DIR, '..', '..'))
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+# --- ここまで ---
+
+# このモジュール用のロガーを取得
+logger = logging.getLogger(__name__)
 
 class SentimentWorker:
     """
-    Symbl.ai のリアルタイムWebSocket APIを使用して、文字起こしされたテキストから感情を分析するワーカー。
+    Google Cloud Natural Language API を使用してテキストの感情分析を行うワーカーだよん！
     """
-    SYMBL_API_DOMAIN = "api.symbl.ai"
-    TOKEN_URL_TEMPLATE = f"https://{SYMBL_API_DOMAIN}/oauth2/token:generate"
-    WS_ENDPOINT_TEMPLATE = f"wss://{SYMBL_API_DOMAIN}/v1/realtime/text/{{connection_id}}"
-
-    def __init__(self,
-                 on_emotion_callback: Callable[[Dict[str, Any]], Any],
-                 symbl_app_id: Optional[str] = None,
-                 symbl_app_secret: Optional[str] = None,
-                 connection_id: Optional[str] = None,
-                 language_code: str = "ja-JP"):
+    def __init__(self, on_emotion_callback: callable, language_code: str = "ja"):
         """
-        SentimentWorkerを初期化します。
+        SentimentWorker を初期化するよん！
 
         Args:
-            on_emotion_callback (Callable): 感情分析結果が検出された際に呼び出されるコールバック関数。
-                                           結果は辞書形式で渡されます。
-            symbl_app_id (str, optional): Symbl.ai の App ID。
-                                          指定がない場合、環境変数 SYMBL_APP_ID から読み込みます。
-            symbl_app_secret (str, optional): Symbl.ai の App Secret。
-                                              指定がない場合、環境変数 SYMBL_APP_SECRET から読み込みます。
-            connection_id (str, optional): 既存のSymbl.ai接続ID。指定がなければ新しいIDを生成します。
-            language_code (str): 分析対象の言語コード (例: "en-US", "ja-JP")。
+            on_emotion_callback (callable): 感情分析結果を処理するコールバック関数。
+                                            {"score": float, "magnitude": float, "text_processed": str}
+                                            みたいな辞書を期待してるっしょ！
+            language_code (str, optional): 分析するテキストの言語コード。デフォルトは "ja" (日本語)。
         """
-        self.logger = logging.getLogger(self.__class__.__name__)
-        
-        self._app_id = symbl_app_id or os.getenv("SYMBL_APP_ID")
-        self._app_secret = symbl_app_secret or os.getenv("SYMBL_APP_SECRET")
-        
-        if not self._app_id or not self._app_secret:
-            msg = "Symbl.ai App ID または App Secret が設定されていません。引数または環境変数で指定してください。"
-            self.logger.error(msg)
-            raise ValueError(msg)
+        self.on_emotion_callback = on_emotion_callback
+        self.language_code = language_code
+        self._is_running = False # APIリクエスト/レスポンス型なので、厳密な「実行中」状態は薄いかもだけど、一応ね！
 
-        self._on_emotion_callback = on_emotion_callback
-        self._connection_id = connection_id if connection_id else str(uuid.uuid4())
-        self._language_code = language_code
-        
-        self._access_token: Optional[str] = None
-        self._websocket: Optional[websockets.client.WebSocketClientProtocol] = None
-        self._listen_task: Optional[asyncio.Task] = None
-        self._aiohttp_session: Optional[aiohttp.ClientSession] = None
-        self._is_running = False # ワーカーの実行状態
-
-        self.logger.info(f"SentimentWorker 初期化完了。Connection ID: {self._connection_id}, Language: {self._language_code}")
-
-    async def _get_aiohttp_session(self) -> aiohttp.ClientSession:
-        if self._aiohttp_session is None or self._aiohttp_session.closed:
-            self._aiohttp_session = aiohttp.ClientSession()
-        return self._aiohttp_session
-
-    async def _fetch_access_token(self) -> bool:
-        payload = {
-            "type": "application",
-            "appId": self._app_id,
-            "appSecret": self._app_secret
-        }
-        session = await self._get_aiohttp_session()
         try:
-            self.logger.info("Symbl.ai アクセストークンを取得中...")
-            async with session.post(self.TOKEN_URL_TEMPLATE, json=payload) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Symbl.ai アクセストークン取得エラー: {response.status} - {error_text}"
-                    )
-                    return False
-                
-                data = await response.json()
-                self._access_token = data.get("accessToken")
-                expires_in = data.get("expiresIn")
-                if self._access_token:
-                    self.logger.info(f"Symbl.ai アクセストークン取得成功。有効期限: {expires_in}秒")
-                    return True
-                else:
-                    self.logger.error(f"レスポンスにアクセストークンが含まれていません: {data}")
-                    return False
-        except aiohttp.ClientError as e:
-            self.logger.error(f"Symbl.ai アクセストークン取得中にaiohttpクライアントエラー: {e}")
-            return False
+            self.language_client = language_v1.LanguageServiceClient()
+            logger.info("🔑 Google Cloud Natural Language API クライアントの初期化に成功しました。")
         except Exception as e:
-            self.logger.exception(f"Symbl.ai アクセストークン取得中に予期せぬエラー: {e}")
-            return False
+            logger.exception("😱 Google Cloud Natural Language API クライアントの初期化中にエラーが発生しました。")
+            self.language_client = None # 初期化失敗したらNoneにしとく
+
+        logger.info("😊 SentimentWorker (Google Cloud NL API版) 初期化完了！✨")
 
     async def start(self) -> bool:
         """
-        Symbl.ai とのWebSocket接続を開始し、感情分析セッションを開始します。
-        成功した場合は True、失敗した場合は False を返します。
+        ワーカーを開始するよん！（Natural Language APIは常時接続不要なので、主に状態管理のため）
         """
-        if self._is_running:
-            self.logger.warning("SentimentWorkerは既に実行中です。")
-            return True
-
-        if not await self._fetch_access_token() or not self._access_token:
-            self.logger.error("Symbl.ai アクセストークンの取得に失敗したため、開始できません。")
+        if not self.language_client:
+            logger.error("😱 Natural Language APIクライアントが初期化されてないから、開始できないよ！")
             return False
-
-        websocket_url = f"{self.WS_ENDPOINT_TEMPLATE.format(connection_id=self._connection_id)}?accessToken={self._access_token}"
-        
-        try:
-            self.logger.info(f"Symbl.ai WebSocket に接続中: {websocket_url.split('?')[0]}...")
-            self._websocket = await websockets.connect(websocket_url)
-            self.logger.info(f"Symbl.ai WebSocket 接続成功 (ID: {self._connection_id})")
-
-            await self._send_start_request()
-            self._listen_task = asyncio.create_task(self._listen_loop())
-            self._is_running = True
-            self.logger.info("SentimentWorker が正常に開始されました。")
-            return True
-        except websockets.exceptions.InvalidURI:
-            self.logger.error(f"無効なWebSocket URIです: {websocket_url.split('?')[0]}")
-            return False
-        except websockets.exceptions.WebSocketException as e:
-            self.logger.error(f"Symbl.ai WebSocket 接続失敗: {e}")
-            return False
-        except Exception as e:
-            self.logger.exception(f"SentimentWorker 開始中に予期せぬエラー: {e}")
-            return False
-
-    async def _send_start_request(self):
-        start_request_payload = {
-            "type": "start_request",
-            "insightTypes": ["emotion"], # 感情分析にフォーカス
-            "config": {
-                "confidenceThreshold": 0.6, # 感情の信頼度閾値 (0.0 - 1.0)
-                "languageCode": self._language_code,
-                # "sentiment": {"enable": True} # "emotion" insightTypeを使用する場合、これは通常不要
-            },
-            # 必要であれば話者情報を追加
-            # "speaker": { "userId": "user@example.com", "name": "User" }
-        }
-        if self._websocket:
-            await self._websocket.send(json.dumps(start_request_payload))
-            self.logger.info("start_request を Symbl.ai に送信しました。")
-            self.logger.debug(f"start_requestペイロード: {json.dumps(start_request_payload)}")
-
-    async def send_text_for_analysis(self, text_transcript: str):
-        """
-        文字起こしされたテキストをSymbl.aiに送信して感情分析を依頼します。
-        """
-        if not self._websocket or not self._websocket.open:
-            self.logger.warning("WebSocketが接続されていないか閉じているため、テキストを送信できません。")
-            return
-
-        message_payload = {
-            "type": "message",
-            "message": {
-                "type": "text",
-                "text": text_transcript
-            }
-        }
-        try:
-            await self._websocket.send(json.dumps(message_payload))
-            self.logger.debug(f"テキストをSymbl.aiに送信: '{text_transcript[:50]}...'")
-        except websockets.exceptions.ConnectionClosed:
-            self.logger.warning("テキスト送信中にWebSocket接続が閉じられました。")
-            self._is_running = False # 停止状態に
-        except Exception as e:
-            self.logger.exception(f"Symbl.aiへのテキスト送信中にエラー: {e}")
-
-    async def _listen_loop(self):
-        self.logger.info("Symbl.ai からのメッセージ監視を開始します...")
-        try:
-            while self._websocket and self._websocket.open:
-                message_str = await self._websocket.recv()
-                self.logger.debug(f"Symbl.ai受信: {message_str[:250]}...") # 長すぎる場合は一部表示
-                
-                try:
-                    message_data = json.loads(message_str)
-                except json.JSONDecodeError:
-                    self.logger.warning(f"Symbl.aiからのメッセージがJSON形式ではありません: {message_str[:250]}")
-                    continue
-                
-                msg_type = message_data.get("type")
-
-                if msg_type == "error":
-                    self.logger.error(f"Symbl.ai APIエラー: {message_data.get('details', message_str)}")
-                    # TODO: 特定のエラーコードに基づいて再接続や停止を検討
-
-                elif msg_type == "insight_response":
-                    for insight in message_data.get("insights", []):
-                        if insight.get("type") == "emotion":
-                            emotions_map = {
-                                val["emotion"].lower(): val["score"] for val in insight.get("emotionValues", [])
-                            } # 感情名を小文字に統一
-                            dominant_emotion = insight.get("dominantEmotion", "").lower()
-                            text_content = insight.get("text", "")
-                            
-                            formatted_result = {
-                                "emotions": emotions_map,
-                                "dominant_emotion": dominant_emotion,
-                                "text_processed": text_content, # Symbl.aiが処理したテキスト
-                                "original_text_length": len(text_content), # 参考情報
-                                "timestamp": insight.get("timestamp", "") 
-                            }
-                            self.logger.info(f"感情分析結果: Dominant={dominant_emotion}, Scores={emotions_map}")
-                            if self._on_emotion_callback:
-                                try:
-                                    # コールバックが非同期関数の場合: await self._on_emotion_callback(formatted_result)
-                                    self._on_emotion_callback(formatted_result)
-                                except Exception as e:
-                                    self.logger.exception(f"on_emotion_callback 呼び出し中にエラー: {e}")
-                # 他のメッセージタイプ (例: 'message_response' で文字起こし結果自体が返る場合など) も必要に応じて処理
-                # elif msg_type == 'message' and message_data.get('message', {}).get('type') == 'recognition_result':
-                #    self.logger.debug(f"Symbl.ai Text Recognition: {message_data}")
-
-
-        except websockets.exceptions.ConnectionClosed as e:
-            self.logger.info(f"Symbl.ai WebSocket接続が閉じられました (コード: {e.code}, 理由: {e.reason})")
-        except asyncio.CancelledError:
-            self.logger.info("Symbl.ai 監視ループがキャンセルされました。")
-        except Exception as e:
-            self.logger.exception(f"Symbl.ai 監視ループで予期せぬエラー: {e}")
-        finally:
-            self.logger.info("Symbl.ai 監視ループ終了。")
-            self._is_running = False # 停止状態に
-            # TODO: 自動再接続ロジックをここ、または上位の管理コンポーネントで検討
+        self._is_running = True
+        logger.info("😊 SentimentWorker (Google Cloud NL API版) が開始されました。テキスト待機中...")
+        return True
 
     async def stop(self):
         """
-        SentimentWorkerを停止し、WebSocket接続をクリーンに閉じます。
+        ワーカーを停止するよん！（Natural Language APIは常時接続不要なので、主に状態管理のため）
         """
-        self.logger.info("SentimentWorker を停止処理中...")
-        self._is_running = False # 先にフラグを立てる
+        self._is_running = False
+        logger.info("😊 SentimentWorker (Google Cloud NL API版) が停止されました。")
+        # Natural Language API クライアントは特にクローズ処理不要
 
-        if self._listen_task and not self._listen_task.done():
-            self._listen_task.cancel()
-            try:
-                await self._listen_task
-            except asyncio.CancelledError:
-                self.logger.info("Symbl.ai 監視タスクが正常にキャンセルされました。")
-            except Exception as e:
-                self.logger.exception(f"監視タスクのキャンセル待ち中にエラー: {e}")
-        self._listen_task = None
+    async def send_text_for_analysis(self, text_content: str):
+        """
+        指定されたテキストの感情分析を非同期で行い、結果をコールバックで通知するよん！
 
-        if self._websocket and self._websocket.open:
-            try:
-                # Symbl.ai は明示的な stop_request を要求しない場合がある (closeで十分)
-                # もし必要なら送信: await self._websocket.send(json.dumps({"type": "stop_request"}))
-                await self._websocket.close()
-                self.logger.info("Symbl.ai WebSocket接続をクローズしました。")
-            except websockets.exceptions.ConnectionClosed:
-                self.logger.info("WebSocketは既にクローズされていました (stop時)。")
-            except Exception as e:
-                self.logger.exception(f"Symbl.ai WebSocketクローズ中にエラー: {e}")
-        self._websocket = None
-        
-        if self._aiohttp_session and not self._aiohttp_session.closed:
-            await self._aiohttp_session.close()
-            self.logger.info("aiohttpセッションをクローズしました。")
-        self._aiohttp_session = None
-        
-        self.logger.info("SentimentWorker が停止しました。")
+        Args:
+            text_content (str): 分析するテキスト。
+        """
+        if not self._is_running:
+            logger.warning("SentimentWorkerが実行されてないから、感情分析スキップするね。")
+            return
+        if not self.language_client:
+            logger.error("Natural Language APIクライアントがないから分析できないっ🥺")
+            return
+        if not text_content or not text_content.strip():
+            logger.debug("空のテキストが来たから、感情分析はスキップするね。")
+            return
 
-# --- (オプション) 簡単なテスト用コード (通常は別ファイルで実行) ---
-# async def sample_emotion_callback(emotion_data: Dict[str, Any]):
-#     print(f"🎉 感情コールバック受信: {emotion_data}")
+        logger.debug(f"📝 感情分析のためにテキスト受信: '{text_content[:100]}...'")
 
-# async def main_test():
-#     print("SentimentWorkerテスト開始...")
-#     # 環境変数 SYMBL_APP_ID と SYMBL_APP_SECRET を設定してください
-#     app_id = os.getenv("SYMBL_APP_ID")
-#     app_secret = os.getenv("SYMBL_APP_SECRET")
+        try:
+            # Natural Language API の呼び出しはブロッキングする可能性があるから、
+            # asyncio.to_thread を使って別スレッドで実行するよん！
+            response_sentiment = await asyncio.to_thread(
+                self._analyze_sentiment_sync, text_content
+            )
 
-#     if not app_id or not app_secret:
-#         print("エラー: 環境変数 SYMBL_APP_ID と SYMBL_APP_SECRET が設定されていません。")
-#         print("テストを実行する前にこれらの変数を設定してください。")
-#         return
+            if response_sentiment:
+                score = response_sentiment.score
+                magnitude = response_sentiment.magnitude
+                logger.info(f"😊 感情分析結果: スコア={score:.2f}, 強さ={magnitude:.2f} (テキスト: '{text_content[:50]}...')")
 
-#     worker = SentimentWorker(
-#         on_emotion_callback=sample_emotion_callback,
-#         symbl_app_id=app_id,
-#         symbl_app_secret=app_secret,
-#         language_code="ja-JP" # または "en-US" など
-#     )
+                # コールバック関数を呼び出して結果を通知
+                # SpeechProcessor側のコールバックの期待する形式に合わせる
+                # ここではscore, magnitudeに加えて、処理したテキストも渡すことで、
+                # コールバック側でどのテキストに対する分析結果か分かりやすくする
+                emotion_data = {
+                    "dominant_emotion": "N/A", # Natural Language API は直接 dominant_emotion を返さない
+                    "emotions": { # Natural Language API の score/magnitude を emotions 辞書に格納
+                        "score": score,
+                        "magnitude": magnitude
+                    },
+                    "text_processed": text_content # 分析対象のテキスト
+                }
+                if self.on_emotion_callback:
+                    # コールバックは非同期かもしれないし、そうでないかもしれない。
+                    # とりあえずそのまま呼ぶけど、もしコールバックが非同期関数なら
+                    # asyncio.create_task(self.on_emotion_callback(emotion_data)) みたいにするのもアリ
+                    self.on_emotion_callback(emotion_data)
+            else:
+                logger.warning("感情分析APIから有効なレスポンスが得られませんでした。")
 
-#     if await worker.start():
-#         print("SentimentWorkerが開始されました。テキストを送信してください。")
-#         try:
-#             # テスト用のテキストをいくつか送信
-#             await worker.send_text_for_analysis("これは素晴らしい一日ですね！とても嬉しいです。")
-#             await asyncio.sleep(2) # APIが処理する時間を少し待つ
-#             await worker.send_text_for_analysis("なんてことだ、本当に悲しい出来事です。")
-#             await asyncio.sleep(2)
-#             await worker.send_text_for_analysis("これは普通の日です。特に何も感じません。")
-#             await asyncio.sleep(5) # 結果が来るのを待つ
-            
-#             print("テスト送信完了。数秒後にワーカーを停止します。")
-#             await asyncio.sleep(5)
+        except Exception as e:
+            logger.exception(f"😱 Google Cloud Natural Language APIでの感情分析中にエラー: {e}")
 
-#         except Exception as e:
-#             print(f"テスト実行中にエラー: {e}")
-#         finally:
-#             print("SentimentWorkerを停止します。")
-#             await worker.stop()
-#     else:
-#         print("SentimentWorkerの開始に失敗しました。")
+    def _analyze_sentiment_sync(self, text_content: str) -> language_v1.types.Sentiment | None:
+        """
+        Google Cloud Natural Language API を使って同期的に感情分析を行う内部メソッド。
+        asyncio.to_thread から呼び出されることを想定してるよ！
+        """
+        if not self.language_client:
+            return None
 
-# if __name__ == '__main__':
-#     # Windowsで "RuntimeError: Event loop is closed" が出る場合対策
-#     if os.name == 'nt':
-#        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-#     try:
-#         asyncio.run(main_test())
-#     except KeyboardInterrupt:
-#         print("テストが中断されました。")
-#     except Exception as e:
-#         print(f"メイン実行でエラー: {e}") 
+        document = language_v1.types.Document(
+            content=text_content,
+            type_=language_v1.types.Document.Type.PLAIN_TEXT, # `type_` を使用
+            language=self.language_code
+        )
+        # エンコーディングタイプを指定 (UTF8が推奨されてる)
+        encoding_type = language_v1.EncodingType.UTF8
+
+        try:
+            response = self.language_client.analyze_sentiment(
+                request={"document": document, "encoding_type": encoding_type}
+            )
+            return response.document_sentiment
+        except Exception as e:
+            logger.error(f"💥 感情分析APIリクエスト失敗 ({text_content[:30]}...): {e}")
+            # ここでエラーを再raiseするか、Noneを返すかは設計次第
+            # 今回はNoneを返して、呼び出し元でログ出力＆処理継続
+            return None
+
+# --- メイン処理のサンプル（テスト用） ---
+async def main_test():
+    # ロギング設定 (テスト用にDEBUGレベルまで表示)
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(levelname)s - %(name)s - %(module)s - %(funcName)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # 環境変数 GOOGLE_APPLICATION_CREDENTIALS が設定されているか確認
+    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        logger.warning("⚠️ 環境変数 GOOGLE_APPLICATION_CREDENTIALS が設定されていません。")
+        logger.warning("   Google Cloud Natural Language API の認証に失敗する可能性があります。")
+        logger.warning("   設定例: export GOOGLE_APPLICATION_CREDENTIALS=\"/path/to/your/keyfile.json\"")
+        # return # ここで終了させても良い
+
+    def dummy_emotion_callback(data):
+        logger.info(f"🤙 コールバック受信！ データ: {data}")
+
+    worker = SentimentWorker(on_emotion_callback=dummy_emotion_callback, language_code="ja")
+
+    if not await worker.start():
+        logger.error("ワーカーの開始に失敗したから、テスト中断するね。")
+        return
+
+    test_texts = [
+        "これは素晴らしい一日ですね！とても嬉しいです。",
+        "この映画は本当に最悪だった。二度と見たくない。",
+        "まあまあ普通かな。特に良くも悪くもない感じ。",
+        "今日はちょっと疲れたけど、明日はきっといい日になるはず。",
+        "このプロジェクトの成功を心から願っています！ワクワクが止まらない！",
+        "なんてことだ！信じられない出来事が起きてしまった…",
+        "", # 空のテキスト
+        "      ", # 空白のみのテキスト
+        "This is a test in English." # 英語のテキスト（language_code="ja"なのでどうなるか）
+    ]
+
+    for text in test_texts:
+        await worker.send_text_for_analysis(text)
+        await asyncio.sleep(1) # API呼び出しの間に少し待機（レートリミット対策にもなるかも）
+
+    # 英語のテストもしてみる
+    worker_en = SentimentWorker(on_emotion_callback=dummy_emotion_callback, language_code="en")
+    await worker_en.start()
+    await worker_en.send_text_for_analysis("I am so happy and excited about this!")
+    await worker_en.send_text_for_analysis("This is a very sad and disappointing situation.")
+    await worker_en.stop()
+
+
+    await worker.stop()
+    logger.info("テスト完了！おつかれさま～🎉")
+
+if __name__ == "__main__":
+    # poetry run python src/backend/workers/sentiment_worker.py などで実行
+    # もしくは、PYTHONPATH=. python src/backend/workers/sentiment_worker.py
+    # `PYTHONPATH=.` は、`from backend.workers...` のようなインポートを解決するため
+    # src ディレクトリをPYTHONPATHに追加する処理が冒頭にあるので、
+    # `python src/backend/workers/sentiment_worker.py` で直接実行できるはず
+    asyncio.run(main_test()) 
