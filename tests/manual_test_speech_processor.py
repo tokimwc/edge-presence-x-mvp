@@ -39,9 +39,14 @@ async def run_mic_test():
     print("  - もし「[Errno -9999] Unanticipated host error」みたいなのが出たら、")
     print("    使ってるマイクのサンプルレートとか設定がPyAudioと合ってないかも。")
     print(f"    今のPyAudio設定: RATE={RATE}, CHANNELS={CHANNELS}, FORMAT={FORMAT} (変更は speech_processor.py でね！)")
+    print("  - Gemini評価もテストするから、GCPプロジェクトと認証情報、config/gemini_config.json の設定も確認してね！")
     print("-" * 30)
 
     processor = SpeechProcessor()
+    test_interview_question = "自己PRを1分程度でお願いします。あなたの強みや経験、そしてこのAI面接システムを開発する上で最も挑戦的だったことは何ですか？"
+    print(f"[テストスクリプト] SpeechProcessorに面接の質問を設定します: '{test_interview_question}'")
+    processor.set_interview_question(test_interview_question)
+
     stop_keyword = "終了" # このキーワードで止まるようにするよん！
     should_stop = False
 
