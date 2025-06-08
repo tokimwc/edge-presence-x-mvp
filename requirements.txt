@@ -1,9 +1,25 @@
-google-cloud-speech
-google-cloud-language
-google-cloud-aiplatform
-numpy
-pyaudio
-python-dotenv
+# --- Web Framework ---
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-dotenv==1.0.1
+websockets==12.0
+
+# --- Google Cloud ---
+google-api-python-client==2.126.0
+google-auth==2.29.0
+google-auth-httplib2==0.2.0
+google-cloud-aiplatform==1.47.0
+google-cloud-language==2.13.3
+google-cloud-speech==2.25.0
+vertexai==1.47.0
+
+# --- Audio & Numerics ---
+pyaudio==0.2.14
+numpy==1.26.4
+
+# --- Utilities ---
+aiohttp==3.9.5
+shapely==2.0.4
 
 # 以下は開発・リンティング用（本番環境には不要な場合もある）
 # pylint

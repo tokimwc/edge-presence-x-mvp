@@ -1,7 +1,9 @@
-<template>
-  <InterviewDashboard />
-</template>
-
 <script setup lang="ts">
-import InterviewDashboard from './components/InterviewDashboard.vue';
-</script> 
+import InterviewLayout from './components/InterviewLayout.vue';
+</script>
+
+<template>
+  <div class="bg-gray-50 min-h-screen">
+    <InterviewLayout />
+  </div>
+</template> 

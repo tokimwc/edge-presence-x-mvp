@@ -1,0 +1,10 @@
+{
+  "project_id": "your-gcp-project-id-here",
+  "location": "asia-northeast1",
+  "model_name": "gemini-1.5-flash-001",
+  "generation_config": {
+    "temperature": 0.8,
+    "top_p": 1.0,
+    "max_output_tokens": 2048
+  }
+} 

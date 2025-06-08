@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 class SentimentWorker:
     """
     Google Cloud Natural Language API を使用してテキストの感情分析を行うワーカーだよん！
+    内部にキューを持っていて、非同期でテキストを処理するよ！
     """
     def __init__(self, on_emotion_callback: callable, language_code: str = "ja"):
         """
@@ -45,106 +46,85 @@ class SentimentWorker:
         """
         self.on_emotion_callback = on_emotion_callback
         self.language_code = language_code
-        self._is_running = False # APIリクエスト/レスポンス型なので、厳密な「実行中」状態は薄いかもだけど、一応ね！
+        self._is_running = False
+        self._text_queue = asyncio.Queue()
+        self._processing_task: Optional[asyncio.Task] = None
 
         try:
             self.language_client = language_v1.LanguageServiceClient()
             logger.info("🔑 Google Cloud Natural Language API クライアントの初期化に成功しました。")
         except Exception as e:
             logger.exception("😱 Google Cloud Natural Language API クライアントの初期化中にエラーが発生しました。")
-            self.language_client = None # 初期化失敗したらNoneにしとく
+            self.language_client = None
 
         logger.info("😊 SentimentWorker (Google Cloud NL API版) 初期化完了！✨")
 
-    async def start(self) -> bool:
+    async def add_text(self, text: str):
         """
-        ワーカーを開始するよん！（Natural Language APIは常時接続不要なので、主に状態管理のため）
+        外部（SpeechProcessor）から感情分析したいテキストを受け取って、
+        キューに追加するメソッドだよん！
         """
-        if not self.language_client:
-            logger.error("😱 Natural Language APIクライアントが初期化されてないから、開始できないよ！")
-            return False
-        self._is_running = True
-        logger.info("😊 SentimentWorker (Google Cloud NL API版) が開始されました。テキスト待機中...")
-        return True
+        if self._is_running:
+            await self._text_queue.put(text)
+        else:
+            logger.warning("SentimentWorkerが停止中にテキストが追加されようとしました。スキップします。")
 
-    async def stop(self):
+    async def _process_queue(self):
         """
-        ワーカーを停止するよん！（Natural Language APIは常時接続不要なので、主に状態管理のため）
+        キューを監視して、テキストが来たら分析処理を叩くメインループ！
         """
-        self._is_running = False
-        logger.info("😊 SentimentWorker (Google Cloud NL API版) が停止されました。")
-        # Natural Language API クライアントは特にクローズ処理不要
+        while self._is_running or not self._text_queue.empty():
+            try:
+                text = await asyncio.wait_for(self._text_queue.get(), timeout=1.0)
+                if text is None:  # 終了の合図
+                    break
 
-    async def send_text_for_analysis(self, text_content: str):
-        """
-        指定されたテキストの感情分析を非同期で行い、結果をコールバックで通知するよん！
+                if not self.language_client:
+                    logger.error("Natural Language APIクライアントがないから分析できないっ🥺")
+                    continue
+                
+                logger.debug(f"📝 感情分析のためにテキスト受信: '{text[:100]}...'")
 
-        Args:
-            text_content (str): 分析するテキスト。
-        """
-        if not self._is_running:
-            logger.warning("SentimentWorkerが実行されてないから、感情分析スキップするね。")
-            return
-        if not self.language_client:
-            logger.error("Natural Language APIクライアントがないから分析できないっ🥺")
-            return
-        if not text_content or not text_content.strip():
-            logger.debug("空のテキストが来たから、感情分析はスキップするね。")
-            return
+                # Natural Language API の呼び出しはブロッキングするので、別スレッドで実行
+                response_sentiment = await asyncio.to_thread(
+                    self._analyze_sentiment_sync, text
+                )
 
-        logger.debug(f"📝 感情分析のためにテキスト受信: '{text_content[:100]}...'")
+                if response_sentiment:
+                    score = response_sentiment.score
+                    magnitude = response_sentiment.magnitude
+                    emotion_data = {
+                        "emotions": {"score": score, "magnitude": magnitude},
+                        "text_processed": text
+                    }
+                    if self.on_emotion_callback:
+                        # create_taskはコールバックが非同期(async def)の場合に使う。
+                        # 今回のコールバックは同期なので、直接呼び出すのが正解！
+                        self.on_emotion_callback(emotion_data)
+                else:
+                    logger.warning(f"感情分析APIから有効なレスポンスが得られませんでした: '{text[:50]}...'")
 
-        try:
-            # Natural Language API の呼び出しはブロッキングする可能性があるから、
-            # asyncio.to_thread を使って別スレッドで実行するよん！
-            response_sentiment = await asyncio.to_thread(
-                self._analyze_sentiment_sync, text_content
-            )
+            except asyncio.TimeoutError:
+                # タイムアウトは問題なし！ループを継続して、_is_running を再チェック
+                continue
+            except Exception as e:
+                logger.exception(f"😱 感情分析処理中にエラーが発生: {e}")
+        
+        logger.info("😊 SentimentWorkerの処理ループが正常に終了しました。")
 
-            if response_sentiment:
-                score = response_sentiment.score
-                magnitude = response_sentiment.magnitude
-                logger.info(f"😊 感情分析結果: スコア={score:.2f}, 強さ={magnitude:.2f} (テキスト: '{text_content[:50]}...')")
-
-                # コールバック関数を呼び出して結果を通知
-                # SpeechProcessor側のコールバックの期待する形式に合わせる
-                # ここではscore, magnitudeに加えて、処理したテキストも渡すことで、
-                # コールバック側でどのテキストに対する分析結果か分かりやすくする
-                emotion_data = {
-                    "dominant_emotion": "N/A", # Natural Language API は直接 dominant_emotion を返さない
-                    "emotions": { # Natural Language API の score/magnitude を emotions 辞書に格納
-                        "score": score,
-                        "magnitude": magnitude
-                    },
-                    "text_processed": text_content # 分析対象のテキスト
-                }
-                if self.on_emotion_callback:
-                    # コールバックは非同期かもしれないし、そうでないかもしれない。
-                    # とりあえずそのまま呼ぶけど、もしコールバックが非同期関数なら
-                    # asyncio.create_task(self.on_emotion_callback(emotion_data)) みたいにするのもアリ
-                    self.on_emotion_callback(emotion_data)
-            else:
-                logger.warning("感情分析APIから有効なレスポンスが得られませんでした。")
-
-        except Exception as e:
-            logger.exception(f"😱 Google Cloud Natural Language APIでの感情分析中にエラー: {e}")
-
-    def _analyze_sentiment_sync(self, text_content: str) -> language_v1.types.Sentiment | None:
+    def _analyze_sentiment_sync(self, text_content: str) -> Optional[language_v1.types.Sentiment]:
         """
         Google Cloud Natural Language API を使って同期的に感情分析を行う内部メソッド。
-        asyncio.to_thread から呼び出されることを想定してるよ！
         """
-        if not self.language_client:
+        if not self.language_client or not text_content.strip():
             return None
-
+            
         document = language_v1.types.Document(
             content=text_content,
-            type_=language_v1.types.Document.Type.PLAIN_TEXT, # `type_` を使用
+            type_=language_v1.types.Document.Type.PLAIN_TEXT,
             language=self.language_code
         )
-        # エンコーディングタイプを指定 (UTF8が推奨されてる)
         encoding_type = language_v1.EncodingType.UTF8
-
         try:
             response = self.language_client.analyze_sentiment(
                 request={"document": document, "encoding_type": encoding_type}
@@ -152,9 +132,46 @@ class SentimentWorker:
             return response.document_sentiment
         except Exception as e:
             logger.error(f"💥 感情分析APIリクエスト失敗 ({text_content[:30]}...): {e}")
-            # ここでエラーを再raiseするか、Noneを返すかは設計次第
-            # 今回はNoneを返して、呼び出し元でログ出力＆処理継続
             return None
+
+    async def start(self):
+        """ワーカーを起動するよん！"""
+        if self._is_running:
+            logger.warning("SentimentWorkerはすでに実行中です。")
+            return
+        if not self.language_client:
+            logger.error("😱 Natural Language APIクライアントが初期化されてないから、開始できないよ！")
+            return
+
+        logger.info("😊 SentimentWorkerを起動します...")
+        self._is_running = True
+        self._processing_task = asyncio.create_task(self._process_queue())
+        logger.info("😊 SentimentWorker (Google Cloud NL API版) が開始されました。テキスト待機中...")
+
+    async def stop(self):
+        """ワーカーを停止するよん！"""
+        if not self._is_running:
+            return
+        logger.info("😊 SentimentWorkerを停止します...")
+        self._is_running = False
+        
+        # 終了の目印としてNoneをキューに入れる
+        try:
+            await asyncio.wait_for(self._text_queue.put(None), timeout=1.0)
+        except asyncio.TimeoutError:
+            logger.warning("SentimentWorkerのキューに終了マーカーを配置中にタイムアウトしました。")
+
+        if self._processing_task:
+            try:
+                # タスクの完了を待つ
+                await asyncio.wait_for(self._processing_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("SentimentWorkerの処理タスクの停止がタイムアウトしました。キャンセルします。")
+                self._processing_task.cancel()
+            except Exception as e:
+                logger.error(f"SentimentWorkerの停止中にエラーが発生: {e}")
+
+        logger.info("😊 SentimentWorkerが安全に停止しました。")
 
 # --- メイン処理のサンプル（テスト用） ---
 async def main_test():
@@ -194,16 +211,15 @@ async def main_test():
     ]
 
     for text in test_texts:
-        await worker.send_text_for_analysis(text)
+        await worker.add_text(text)
         await asyncio.sleep(1) # API呼び出しの間に少し待機（レートリミット対策にもなるかも）
 
     # 英語のテストもしてみる
     worker_en = SentimentWorker(on_emotion_callback=dummy_emotion_callback, language_code="en")
     await worker_en.start()
-    await worker_en.send_text_for_analysis("I am so happy and excited about this!")
-    await worker_en.send_text_for_analysis("This is a very sad and disappointing situation.")
+    await worker_en.add_text("I am so happy and excited about this!")
+    await worker_en.add_text("This is a very sad and disappointing situation.")
     await worker_en.stop()
-
 
     await worker.stop()
     logger.info("テスト完了！おつかれさま～🎉")

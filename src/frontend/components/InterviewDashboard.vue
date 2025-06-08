@@ -1,35 +1,42 @@
 <template>
-  <div class="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-4 sm:p-6 lg:p-8">
+  <div class="min-h-screen bg-gray-900 text-gray-200 p-8">
     <div class="max-w-7xl mx-auto">
-      <h1 class="text-2xl font-bold text-center mb-6">AI面接コーチング</h1>
-      
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <h1 class="text-3xl font-bold text-center mb-10 tracking-wider">
+        AI Interview Coach ✨
+      </h1>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
         <!-- Left Column: Real-time Feedback -->
-        <div class="flex flex-col">
+        <div class="bg-gray-800 rounded-lg shadow-lg p-6">
+          <h2 class="text-xl font-bold mb-4">リアルタイムフィードバック</h2>
           <RealtimeFeedback :realtime-transcription="store.realtimeTranscription" />
         </div>
 
         <!-- Right Column: STAR Evaluation -->
-        <div class="flex flex-col">
-          <StarEvaluationCard v-if="store.starEvaluation" :evaluation="store.starEvaluation" />
+        <div class="bg-gray-800 rounded-lg shadow-lg p-6">
+          <h2 class="text-xl font-bold mb-4">STARメソッド評価</h2>
+          <Transition name="fade">
+            <StarEvaluationCard
+              v-if="store.starEvaluation"
+              :evaluation="store.starEvaluation"
+            />
+          </Transition>
         </div>
       </div>
 
       <!-- Action Buttons -->
       <div class="mt-8 flex justify-center space-x-4">
         <button
-          @click="handleStartInterview"
-          :disabled="store.isSessionActive"
-          class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-transform transform hover:scale-105 disabled:bg-gray-400 disabled:cursor-not-allowed"
+          @click="toggleRecording"
+          :disabled="isProcessing"
+          :class="[
+            store.isSessionActive 
+              ? 'bg-red-500 hover:bg-red-600' 
+              : 'bg-blue-500 hover:bg-blue-600',
+            'text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-all transform hover:scale-105 disabled:bg-gray-400 disabled:cursor-not-allowed'
+          ]"
         >
-          面接を開始する
-        </button>
-        <button
-          v-if="store.isSessionActive"
-          @click="handleStopInterview"
-          class="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-transform transform hover:scale-105"
-        >
-          面接を終了する
+          {{ store.isSessionActive ? '面接を終了する' : '面接を開始する' }}
         </button>
       </div>
     </div>
@@ -37,107 +44,104 @@
 </template>
 
 <script setup lang="ts">
-import RealtimeFeedback from './RealtimeFeedback.vue';
-import StarEvaluationCard from './StarEvaluationCard.vue';
-import { ref, onUnmounted } from 'vue';
-import { useInterviewStore } from '../stores/interview';
+import { ref, onUnmounted, computed, watch } from "vue";
+import { useInterviewStore } from "../stores/interview";
+import RealtimeFeedback from "./RealtimeFeedback.vue";
+import StarEvaluationCard from "./StarEvaluationCard.vue";
+import { MicrophoneIcon } from "@heroicons/vue/24/solid";
 
 const store = useInterviewStore();
 
 const mediaRecorder = ref<MediaRecorder | null>(null);
 const localStream = ref<MediaStream | null>(null);
+const isProcessing = ref(false);
 
 /**
- * @description マイクからの音声ストリーミングを開始し、WebSocket経由で送信します。
+ * @description 面接の開始・停止を切り替えます。
  */
-const startStreaming = async () => {
+const toggleRecording = async () => {
+  isProcessing.value = true;
+
   if (store.isSessionActive) {
-    console.log('すでにセッションが開始されています。');
-    return;
-  }
-
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    localStream.value = stream;
-    
-    const mimeType = 'audio/webm;codecs=opus';
-    if (!MediaRecorder.isTypeSupported(mimeType)) {
-      alert(`お使いのブラウザは ${mimeType} 形式に対応していません。`);
-      return;
+    // --- 面接を停止 ---
+    if (mediaRecorder.value && mediaRecorder.value.state !== 'inactive') {
+      mediaRecorder.value.stop();
     }
+    // `mediaRecorder.stop()`がトリガーするoncloseイベントで
+    // 関連リソースのクリーンアップはPiniaストア側で行われる
+  } else {
+    // --- 面接を開始 ---
+    try {
+      store.realtimeTranscription = '';
+      store.starEvaluation = null;
 
-    mediaRecorder.value = new MediaRecorder(stream, { mimeType });
-    
-    mediaRecorder.value.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        store.sendAudioChunk(event.data);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      localStream.value = stream;
+
+      const mimeType = 'audio/webm;codecs=opus';
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        alert(`お使いのブラウザは ${mimeType} 形式に対応していません。`);
+        isProcessing.value = false;
+        return;
       }
-    };
+      
+      mediaRecorder.value = new MediaRecorder(stream, { mimeType });
 
-    // WebSocket接続が確立されたら録音を開始
-    const unsubscribe = store.$onAction(({ name, after }) => {
-      if (name === 'startInterviewSession') {
-        after(() => {
-          if(store.isSessionActive) {
-            mediaRecorder.value?.start(500); // 500msごとにデータを送信
-          }
-        });
-        unsubscribe(); // 一度実行されたら監視を解除
-      }
-    });
+      mediaRecorder.value.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          store.sendAudioChunk(event.data);
+        }
+      };
+      
+      // PiniaストアにWebSocket接続を開始させる
+      store.startInterviewSession();
 
-  } catch (err) {
-    console.error('マイクへのアクセス中にエラーが発生しました:', err);
-    alert('マイクの使用が許可されなかったか、デバイスが見つかりませんでした。');
+    } catch (err) {
+      console.error('マイクへのアクセス中にエラーが発生しました:', err);
+      alert('マイクの使用が許可されなかったか、デバイスが見つかりませんでした。');
+      isProcessing.value = false;
+    }
   }
 };
 
-/**
- * @description 面接セッションを開始します。
- */
-const handleStartInterview = () => {
-  console.log('面接開始ボタンがクリックされました。');
-  store.realtimeTranscription = '';
-  store.starEvaluation = null;
-  store.startInterviewSession(); // WebSocket接続を開始
-  startStreaming(); // マイクの準備を開始
-};
-
-/**
- * @description 面接セッションを停止します。
- */
-const handleStopInterview = () => {
-  console.log('面接終了ボタンがクリックされました。');
-  if (mediaRecorder.value && mediaRecorder.value.state !== 'inactive') {
-    mediaRecorder.value.stop();
+// isSessionActive の状態を監視して後処理を行う
+watch(() => store.isSessionActive, (isActive, wasActive) => {
+  if (isActive) {
+    // セッションが開始されたら録音を開始
+    mediaRecorder.value?.start(1000); // 1秒ごとにチャンクを生成
+    isProcessing.value = false;
+  } else if (wasActive && !isActive) {
+    // セッションが終了したらストリームをクリーンアップ
+    if (localStream.value) {
+      localStream.value.getTracks().forEach(track => track.stop());
+      localStream.value = null;
+    }
+    mediaRecorder.value = null;
+    isProcessing.value = false;
+    console.log('録音セッションが正常に終了し、リソースがクリーンアップされました。');
   }
-  
-  if (localStream.value) {
-    localStream.value.getTracks().forEach(track => track.stop());
-    localStream.value = null;
-  }
-
-  store.stopInterviewSession(); // WebSocket接続を閉じる
-
-  // テスト用のダミーデータ
-  store.starEvaluation = {
-    situation: { score: 8.8, feedback: "具体的な状況設定が明確で、課題の背景がよく理解できました。" },
-    task: { score: 7.5, feedback: "担当した役割と目標が具体的でしたが、もう少し定量的な目標設定があるとより良かったです。" },
-    action: { score: 9.2, feedback: "主体的に行動し、技術的な課題解決能力の高さが伺えます。素晴らしいです。" },
-    result: { score: 8.5, feedback: "プロジェクトへの貢献度が明確で、ポジティブな結果を具体的に示せています。" }
-  };
-};
+});
 
 /**
  * @description コンポーネントがアンマウントされるときにセッションをクリーンアップします。
  */
 onUnmounted(() => {
   if (store.isSessionActive) {
-    handleStopInterview();
+    if (mediaRecorder.value && mediaRecorder.value.state !== 'inactive') {
+      mediaRecorder.value.stop();
+    }
   }
 });
 </script>
 
 <style scoped>
-/* Scopedスタイルが必要な場合はここに追加 */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.7s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
 </style> 

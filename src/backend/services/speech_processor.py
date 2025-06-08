@@ -4,6 +4,8 @@ import asyncio
 import pyaudio
 import logging # logging モジュールをインポート
 import os # 環境変数のために追加
+import time
+import threading
 
 # --- Pythonのモジュール検索パスにsrcディレクトリを追加 ---
 import sys
@@ -15,9 +17,12 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 # --- ここまで ---
 
-# Worker をインポート (相対パスからsrcを基準とした絶対パス風に変更)
+# --- サービス、ワーカー、設定ファイルのインポート ---
+from backend.services import gemini_service # gemini_serviceモジュールとしてインポート！
 from backend.workers.pitch_worker import PitchWorker
-from backend.workers.sentiment_worker import SentimentWorker # SentimentWorker をインポート
+from backend.workers.sentiment_worker import SentimentWorker
+# 新しく作った共通設定ファイルをインポート！
+from backend.shared_config import RATE, CHUNK, CHANNELS, FORMAT, SAMPLE_WIDTH
 
 # logging の基本設定 (モジュールレベルで１回だけ実行)
 # SpeechProcessor クラスの外で設定するのが一般的だよん！
@@ -29,248 +34,25 @@ logging.basicConfig(
 # このモジュール用のロガーを取得
 logger = logging.getLogger(__name__)
 
-# PyAudioの設定 (これらの値はマイクや要件に合わせて調整してね！)
-FORMAT = pyaudio.paInt16  # 音声フォーマット (16bit)
-CHANNELS = 1             # モノラル
-RATE = 16000             # サンプルレート (16kHz)
-CHUNK = int(RATE / 10)   # 100ms分のフレームサイズ (Speech-to-Textの推奨に合わせて)
-SAMPLE_WIDTH = pyaudio.PyAudio().get_sample_size(FORMAT) # PyAudioからサンプル幅を取得
-
-# --- Gemini評価システム用の追加インポートと設定 ---
-import json
-from vertexai.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold
-import vertexai # vertexaiのメインライブラリもインポート
-
-# Gemini設定ファイルのパス (speech_processor.pyからの相対パスを考慮)
-# _SRC_DIR は src ディレクトリを指すので、そこから一つ上がって config を指定
-GEMINI_CONFIG_PATH = os.path.join(_SRC_DIR, "..", "config", "gemini_config.json")
-
-PROMPT_TEMPLATE = """
-# プロンプトテンプレート：AI面接評価システム
-
-あなたは、経験豊富なキャリアコンサルタントであり、行動面接のプロフェッショナルです。
-特にSTAR手法を用いた回答の分析と、声のトーンや感情表現から候補者のコミュニケーション能力を見抜くことに長けています。
-提供された情報に基づき、面接の回答を多角的に評価し、具体的かつ建設的なフィードバックを提供してください。
-
-## 入力情報
-
-### 面接の質問:
-```
-{interview_question}
-```
-
-### 回答の文字起こし:
-```
-{transcript}
-```
-
-### ピッチ解析結果:
-- 平均ピッチ: {average_pitch} Hz
-- ピッチの変動幅: {pitch_range} Hz
-- 話す速度: {speaking_rate} 文字/分
-- ポーズの頻度: {pause_frequency} 回/分
-- ポーズの平均時間: {average_pause_duration} 秒
-
-### 感情分析結果:
-- 主な感情: {dominant_emotion}
-- 感情スコア ({dominant_emotion}): {emotion_score}
-- 感情の強さ: {emotion_intensity}
-- 発話中の感情の推移: {emotion_transition}
-
-## 評価基準
-
-### 1. STAR手法の評価
-*   **Situation（状況）:**
-    *   具体的な状況説明が明確になされているか？
-    *   回答者がどのような状況に置かれていたのか、背景情報が十分に提供されているか？
-    *   いつ、どこで、誰が関わっていたのかが明確か？
-*   **Task（課題）:**
-    *   取り組むべき課題や目標が明確に定義されているか？
-    *   その課題の重要性や困難度が伝わるか？
-    *   何を達成する必要があったのかが具体的か？
-*   **Action（行動）:**
-    *   課題解決のために、どのような思考プロセスを経て、具体的にどのような行動を取ったのか説明されているか？
-    *   行動の主体は回答者自身か？
-    *   行動の理由や目的が明確か？
-    *   複数の行動がある場合、それらが論理的に関連しているか？
-*   **Result（結果）:**
-    *   行動の結果、どのような具体的な成果が得られたのか明確に説明されているか？
-    *   可能な限り定量的なデータ（数値、割合など）を用いて成果を示せているか？
-    *   結果から何を学び、次にどう活かそうとしているかが述べられているか？
-    *   ポジティブな結果だけでなく、ネガティブな結果やそこからの学びもあれば評価する。
-
-### 2. 回答の構造
-*   **論理性と構成:**
-    *   回答全体が論理的で分かりやすい構成になっているか？ (例: PREP法、時系列など)
-    *   話の導入、本論、結論が明確か？
-    *   冗長な部分や話が飛躍している箇所はないか？
-*   **具体性:**
-    *   抽象的な表現に終始せず、具体的なエピソードや事例を交えて説明できているか？
-    *   誰が聞いても情景をイメージできるような詳細さがあるか？
-
-### 3. 声のトーンと話し方
-*   **自信と熱意:**
-    *   声のトーンは安定しており、自信が感じられるか？
-    *   語尾が明瞭で、ハキハキと話せているか？
-    *   話の内容に対する熱意や意欲が声から伝わるか？
-    *   早口すぎたり、逆に遅すぎて間延びしていないか？
-*   **聞き取りやすさ:**
-    *   声量や滑舌は適切で、聞き取りやすい話し方か？
-    *   不要な「えーっと」「あのー」などのフィラーが多すぎないか？
-
-### 4. 感情表現
-*   **適切性と一貫性:**
-    *   話の内容と感情表現（声のトーン、話す速度などから推測されるもの）が一貫しているか？
-    *   場面に応じた適切な感情が表現できているか？（例：困難を語る際は真剣なトーン、成功を語る際は明るいトーンなど）
-    *   感情の起伏が激しすぎたり、逆に乏しすぎたりしないか？
-
-### 5. 全体的な印象
-*   **分かりやすさ:**
-    *   回答全体を通して、伝えたいことが明確に伝わってくるか？
-    *   専門用語を使いすぎず、相手に配慮した言葉遣いができているか？
-*   **説得力:**
-    *   自己PRや経験談に説得力があり、聞き手を納得させられるか？
-    *   根拠に基づいた主張ができているか？
-*   **熱意と意欲:**
-    *   その企業や職務に対する熱意や入社意欲が感じられるか？
-    *   ポジティブな姿勢で面接に臨んでいるか？
-
-## 出力形式
-
-### 1. 総合評価 (5段階)
-1.  改善が必要
-2.  まだ改善の余地がある
-3.  良い
-4.  非常に良い
-5.  素晴らしい
-
-### 2. 各評価項目の詳細フィードバック
-*   **STAR手法:**
-    *   Situation: （具体的なフィードバックと改善点）
-    *   Task: （具体的なフィードバックと改善点）
-    *   Action: （具体的なフィードバックと改善点）
-    *   Result: （具体的なフィードバックと改善点）
-*   **回答の構造:** （具体的なフィードバックと改善点）
-*   **声のトーンと話し方:** （具体的なフィードバックと改善点、ピッチ解析結果を元に）
-*   **感情表現:** （具体的なフィードバックと改善点、感情分析結果を元に）
-*   **全体的な印象:** （具体的なフィードバックと改善点）
-
-### 3. 回答全体の改善点 (3つ程度)
-1.  （具体的な改善点）
-2.  （具体的な改善点）
-3.  （具体的な改善点）
-
-### 4. アピールポイント (3つ程度)
-1.  （特に優れている点、強みとなる点）
-2.  （特に優れている点、強みとなる点）
-3.  （特に優れている点、強みとなる点）
-
-## 指示
-
-上記の入力情報と評価基準に基づき、面接の回答を詳細に分析・評価してください。
-そして、定義された出力形式に従って、総合評価、各評価項目の詳細なフィードバック、回答全体の改善点、およびアピールポイントを生成してください。
-フィードバックは、具体的で、候補者が次の面接に活かせるような実践的なアドバイスを心がけてください。
-
-## 制約
-*   個人を特定できる情報（氏名、具体的な企業名、製品名など、一般的に公開されていない情報）を生成、または推測して出力しないでください。
-*   いかなる形であれ、差別的な表現や、特定の個人・団体を不当に貶めるような内容は絶対に含めないでください。
-*   提供された情報のみに基づいて評価を行い、憶測や個人的な偏見を排除してください。
-*   法律や倫理に反するような不適切なアドバイスは行わないでください。
-*   フィードバックは客観的かつ建設的なものに終始してください。
-"""
-
-gemini_model_instance = None # グローバル変数としてGeminiモデルを保持（クラス内で管理推奨）
-gemini_config_data = None    # グローバル変数としてGemini設定を保持
-
-def load_gemini_config_and_init():
-    global gemini_model_instance, gemini_config_data
-    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-        logger.warning(
-            "環境変数 GOOGLE_APPLICATION_CREDENTIALS が設定されていません。"
-            "Vertex AI APIへの認証に失敗する可能性があります。"
-        )
-        # raise EnvironmentError("GOOGLE_APPLICATION_CREDENTIALS is not set.") # 必要ならエラーにする
-        return False # 認証情報がない場合はFalseを返す
-
-    try:
-        with open(GEMINI_CONFIG_PATH, 'r') as f:
-            gemini_config_data = json.load(f)
-        logger.info(f"Gemini設定ファイルを読み込みました: {GEMINI_CONFIG_PATH}")
-
-        # project_id -> project に変更！せんぱいの設定に合わせたよん！
-        vertexai.init(project=gemini_config_data["project"], location=gemini_config_data["location"])
-        gemini_model_instance = GenerativeModel(
-            gemini_config_data["model_name"],
-            # せんぱいが設定してくれた generation_config を読み込むようにしたよ！
-            generation_config=gemini_config_data.get("generation_config", {}),
-            # 安全性設定の例 (必要に応じて調整)
-            # safety_settings={
-            #     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-            #     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-            # }
-        )
-        logger.info(f"Geminiモデル ({gemini_config_data['model_name']}) の準備ができました。")
-        return True
-    except FileNotFoundError:
-        logger.error(f"Gemini設定ファイルが見つかりません: {GEMINI_CONFIG_PATH}")
-    except Exception as e:
-        logger.error(f"Gemini設定の読み込みまたは初期化中にエラー: {e}")
-    return False
-
-async def get_gemini_evaluation(
-    interview_question: str,
-    transcript: str,
-    pitch_analysis: dict,
-    emotion_analysis: dict
-) -> str | None:
-    if not gemini_model_instance or not gemini_config_data:
-        logger.error("Geminiモデルが初期化されていません。")
-        return None
-
-    prompt = PROMPT_TEMPLATE.format(
-        interview_question=interview_question,
-        transcript=transcript,
-        average_pitch=pitch_analysis.get("average_pitch", "N/A"),
-        pitch_range=pitch_analysis.get("pitch_range", "N/A"),
-        speaking_rate=pitch_analysis.get("speaking_rate", "N/A"),
-        pause_frequency=pitch_analysis.get("pause_frequency", "N/A"),
-        average_pause_duration=pitch_analysis.get("average_pause_duration", "N/A"),
-        dominant_emotion=emotion_analysis.get("dominant_emotion", "N/A"),
-        emotion_score=emotion_analysis.get("emotion_score", "N/A"),
-        emotion_intensity=emotion_analysis.get("emotion_intensity", "N/A"),
-        emotion_transition=emotion_analysis.get("emotion_transition", "N/A")
-    )
-    logger.info("Geminiへの評価リクエストプロンプトを作成しました。")
-
-    try:
-        response = await gemini_model_instance.generate_content_async(prompt)
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-            evaluation_text = response.candidates[0].content.parts[0].text
-            logger.info("Geminiから面接評価を受信しました。")
-            return evaluation_text
-        else:
-            logger.warning("Geminiからのレスポンスに有効な評価テキストが含まれていませんでした。")
-            return "評価結果の形式が無効です。"
-    except Exception as e:
-        logger.error(f"Gemini APIリクエスト中にエラーが発生: {e}")
-        return f"Gemini APIエラー: {str(e)}"
-
-def parse_gemini_response_data(response_text: str) -> dict:
-    """Geminiからのレスポンスをパースする関数 (今回は未実装、生のテキストを返す)"""
-    logger.info("Geminiレスポンスのパース処理 (現在は生テキストを返します)")
-    return {"raw_evaluation": response_text}
-
-# --- ここまでGemini評価システム用の追加 ---
+# --- SpeechProcessorクラスでGemini関連のコードを管理するので、ここの重複は削除！ ---
 
 class SpeechProcessor:
+    """
+    リアルタイム音声処理のクラスだよん！
+    文字起こし、音程解析、感情分析、Gemini評価をまとめてやるぞ！
+    """
+
     def __init__(self):
         self.speech_client = speech.SpeechAsyncClient()
-        self.pyaudio_instance = pyaudio.PyAudio()
         self._audio_queue = asyncio.Queue()
         self._is_running = False
-        self._microphone_task = None
+        self._processing_task = None # メインの処理タスクを保持する
+        self._microphone_task = None # 手動テスト用のマイクスレッドを保持する
         self._stop_event = asyncio.Event()
         self.main_loop = asyncio.get_event_loop()
+        self.pyaudio_instance = None
+        self.microphone_stream = None
+        self.send_to_client_callback = None # 送信コールバック関数
 
         # PitchWorker のインスタンスを作成
         try:
@@ -300,16 +82,84 @@ class SpeechProcessor:
         logger.info(f"PyAudio設定: FORMAT={FORMAT}, CHANNELS={CHANNELS}, RATE={RATE}, CHUNK={CHUNK}, SAMPLE_WIDTH={SAMPLE_WIDTH}")
 
         # --- Gemini評価システム関連の初期化 ---
-        self.gemini_enabled = load_gemini_config_and_init()
+        # gemini_service モジュールのインポート時に初期化が走るから、ここではインスタンスの有無をチェックするだけ！
+        self.gemini_enabled = gemini_service.gemini_model_instance is not None
         if self.gemini_enabled:
             logger.info("👑 Gemini評価システムが有効になりました。")
         else:
             logger.warning("😢 Gemini評価システムは無効です。設定または認証情報を確認してください。")
         
+        # --- セッション中のデータを保持する変数を初期化 ---
         self.current_interview_question = "自己PRをしてください。" # デフォルトの質問
-        self.last_pitch_analysis_summary = {} # ピッチ解析の集計結果を保持する場所 (TODO: PitchWorkerと連携)
-        self.last_emotion_analysis_summary = {} # 感情分析の集計結果を保持する場所 (TODO: SentimentWorkerと連携)
-        # --- ここまでGemini評価システム関連の初期化 ---
+        self.full_transcript = "" # 文字起こし全文を保持
+        self.pitch_values = []    # ピッチの測定値を保持
+        self.last_pitch_analysis_summary = {} # ピッチ解析の集計結果
+        self.last_emotion_analysis_summary = {} # 感情分析の集計結果
+        # --- ここまでセッションデータ変数 ---
+
+    async def process_audio_chunk(self, chunk: bytes):
+        """
+        WebSocketから受け取った音声チャンクを処理するよ。
+        ピッチ解析と、文字起こしキューへの追加を行う。
+        """
+        if not self._is_running:
+            return
+
+        # 1. ピッチを解析
+        if self.pitch_worker:
+            pitch = self.pitch_worker.analyze_pitch(chunk)
+            if pitch is not None:
+                self.pitch_values.append(pitch)
+                # logger.debug(f"🎤 検出されたピッチ: {pitch:.2f} Hz") # デバッグ用に便利
+
+        # 2. 文字起こし用のキューに音声データを追加
+        await self._audio_queue.put(chunk)
+
+    async def _start_workers(self):
+        """感情分析ワーカーを起動するよん！"""
+        # PitchWorkerは都度呼び出すので、ここでは起動しない
+        if self.sentiment_worker:
+            # startが非同期メソッドの可能性があるのでawaitする
+            await self.sentiment_worker.start()
+
+    async def _stop_workers(self):
+        """感情分析ワーカーを停止するよん！"""
+        # PitchWorkerは都度呼び出すので、ここでは停止しない
+        if self.sentiment_worker:
+            # stopが非同期メソッドの可能性があるのでawaitする
+            await self.sentiment_worker.stop()
+
+    def _get_pyaudio_instance(self):
+        """PyAudioのインスタンスを取得または生成するよ。マイクテストの時だけね！"""
+        if self.pyaudio_instance is None:
+            logger.info("PyAudioインスタンスがないので、新しく作るよ！")
+            try:
+                self.pyaudio_instance = pyaudio.PyAudio()
+                logger.info("マイクテスト用にPyAudioインスタンスを新しく作ったよ！")
+            except Exception:
+                # ここでスタックトレースも出力する
+                logger.error("PyAudioの初期化中にガチなエラーでちゃった…", exc_info=True)
+                self.pyaudio_instance = None # 失敗したらNoneに戻す
+        return self.pyaudio_instance
+
+    def set_send_to_client_callback(self, callback):
+        """フロントエンドにデータを送るための非同期コールバック関数をセットするよ"""
+        self.send_to_client_callback = callback
+
+    async def _send_to_client(self, data_type, payload):
+        """コールバック経由でクライアントにJSONデータを送信する"""
+        if self.send_to_client_callback:
+            message = {"type": data_type, "payload": payload}
+            await self.send_to_client_callback(message)
+
+    def _get_speech_client(self):
+        # ... existing code ...
+        pass
+
+    def set_interview_question(self, question: str):
+        """現在の面接の質問を設定するよん！"""
+        self.current_interview_question = question
+        logger.info(f"🎤 設定された面接の質問: {question}")
 
     def _handle_emotion_data(self, emotion_data: dict):
         """
@@ -335,9 +185,66 @@ class SpeechProcessor:
         else:
             logger.warning(f"🤔 感情分析結果が不完全です: {emotion_data}")
 
+    async def _process_speech_stream(self):
+        """
+        キューからの音声データをGoogleに送り、結果を処理するメインループだよん！
+        WebSocketからのストリーム用に調整したバージョン。
+        """
+        try:
+            # 1. Google Speech-to-Text APIに接続し、ストリーミング設定を送信
+            stream_generator = self._microphone_stream_generator()
+            # streaming_recognizeはイテレータを返すコルーチンなので、awaitで解決する
+            responses_iterator = await self.speech_client.streaming_recognize(requests=stream_generator)
+            logger.info("✅ Google Speech-to-Text APIとの接続完了！レスポンス待機中...")
+
+            # 2. ワーカープロセスを開始
+            await self._start_workers()
+
+            # 3. レスポンスを非同期で処理
+            async for response in responses_iterator:
+                if not self._is_running:
+                    break
+
+                # --- デバッグログ: レスポンス全体を出力 ---
+                # logger.debug(f"Googleからのレスポンス受信: {response}")
+
+                if not response.results:
+                    continue
+
+                result = response.results[0]
+                if not result.alternatives:
+                    continue
+
+                transcript = result.alternatives[0].transcript
+                
+                # ワーカーにテキストデータを渡す
+                if self.sentiment_worker:
+                    await self.sentiment_worker.add_text(transcript)
+
+                if result.is_final:
+                    logger.info(f"✅ 確定した文字起こし: {transcript}")
+                    # 全文文字起こしを更新
+                    self.full_transcript += transcript + " "
+                    await self._send_to_client(
+                        "final_transcript_segment", 
+                        {"transcript": transcript}
+                    )
+                else:
+                    # logger.info(f"💬 仮の文字起こし: {transcript}")
+                    await self._send_to_client(
+                        "interim_transcript",
+                        {"transcript": transcript}
+                    )
+        except Exception as e:
+            logger.error(f"😱 _process_speech_streamでエラー発生！: {e}", exc_info=True)
+            await self._send_to_client("error", {"message": f"音声処理中にエラーが発生しました: {e}"})
+        finally:
+            logger.info("🏁 _process_speech_stream ループが終了しました。")
+            # ここではワーカーを止めない。stop_transcription_and_evaluationで制御する。
+
     async def _microphone_stream_generator(self):
         """
-        マイクからの音声データを非同期で供給するジェネレータだよん！
+        キューからの音声データを非同期で供給するジェネレータだよん！
         Speech-to-Text API が期待する StreamingRecognitionConfig と音声チャンクを yield する。
         """
         streaming_config = speech.StreamingRecognitionConfig(
@@ -356,313 +263,267 @@ class SpeechProcessor:
             try:
                 chunk = await asyncio.wait_for(self._audio_queue.get(), timeout=0.1)
                 if chunk is None: 
+                    logger.info("キューからNoneを受け取ったのでジェネレータを終了します。")
                     break
+                
+                # --- PitchWorkerの処理をここに移動しない ---
+                # このジェネレータはSpeech-to-Text APIにデータを送ることに専念する
+                # ピッチ解析は process_audio_chunk で行われる
+                
                 yield speech.StreamingRecognizeRequest(audio_content=chunk)
             except asyncio.TimeoutError:
+                # タイムアウトは想定内の動作なので、ログレベルをDEBUGに
+                # logger.debug("キューからの待機がタイムアウトしました。次のループへ。")
                 continue
+            except asyncio.CancelledError:
+                logger.info("ジェネレータがキャンセルされました。")
+                break
             except Exception as e:
-                logger.exception("😱 _microphone_stream_generator で予期せぬエラー")
+                logger.error(f"😱 _microphone_stream_generatorで予期せぬエラー: {e}", exc_info=True)
                 break
         logger.info("🎤 _microphone_stream_generator 終了")
 
     def _microphone_worker(self):
         """
-        PyAudioを使ってマイクから音声データを読み込み、キューに入れる同期処理ワーカー。
-        これは別スレッドで実行される想定だよん！
+        PyAudioでマイクから音声を取得し、キューに入れるワーカー関数 (スレッドで実行)。
+        これは手動テスト (`manual_test_speech_processor.py`) のためのものだよん！
         """
+        p = self._get_pyaudio_instance()
+        if not p:
+            logger.error("PyAudioインスタンスの取得に失敗したため、マイクワーカーを開始できません。")
+            return
+
         try:
-            stream = self.pyaudio_instance.open(
+            self.microphone_stream = p.open(
                 format=FORMAT,
                 channels=CHANNELS,
                 rate=RATE,
                 input=True,
                 frames_per_buffer=CHUNK,
+                stream_callback=self._microphone_callback
             )
-            logger.info("🎙️ マイクストリーム開始！ 音声収集中...")
-            data_counter = 0 # デバッグ用カウンター
-            while self._is_running and not self._stop_event.is_set():
-                try:
-                    data = stream.read(CHUNK, exception_on_overflow=False)
-                    data_counter += 1
-                    
-                    log_pitch_str = "N/A"
-                    if self.pitch_worker and data:
-                        try:
-                            pitch_hz = self.pitch_worker.analyze_pitch(data)
-                            if pitch_hz is not None:
-                                log_pitch_str = f"{pitch_hz:.2f} Hz"
-                                # TODO: ピッチ情報を self.last_pitch_analysis_summary に集計・格納する
-                                # 例: 平均ピッチ、変動幅などを計算して保持
-                                # 今回はダミーとして最新のピッチを一時的に保持するイメージ (実際には集計が必要)
-                                if "pitches" not in self.last_pitch_analysis_summary:
-                                    self.last_pitch_analysis_summary["pitches"] = []
-                                self.last_pitch_analysis_summary["pitches"].append(pitch_hz)
-                                if len(self.last_pitch_analysis_summary["pitches"]) > 100: # 最新100件保持など
-                                     self.last_pitch_analysis_summary["pitches"].pop(0)
+            logger.info("🎤 マイクストリームを開きました。録音開始！")
 
-                        except Exception as e:
-                            logger.error(f"😱 (Worker) PitchWorkerでのピッチ解析エラー: {e}")
-                            log_pitch_str = "Error"
+            while self.microphone_stream.is_active() and self._is_running:
+                time.sleep(0.1)
 
-                    logger.debug(f"🎤 [Worker-{data_counter}] チャンク受信！ サイズ: {len(data)}, 先頭10バイト: {data[:10].hex() if data else 'None'} | 🎵 ピッチ: {log_pitch_str}")
-                    
-                    asyncio.run_coroutine_threadsafe(self._audio_queue.put(data), self.main_loop)
-                except IOError as e:
-                    logger.warning(f"🎤 PyAudio readエラー (たぶんオーバーフロー): {e}") 
-                    asyncio.run_coroutine_threadsafe(asyncio.sleep(0.01), self.main_loop)
-                except Exception as e:
-                    logger.exception(f"😱 _microphone_workerの内部ループで予期せぬエラー: {e}")
-                    # ループを継続するために ചെറിയ待機時間を設けることも検討
-                    asyncio.run_coroutine_threadsafe(asyncio.sleep(0.01), self.main_loop)
-
-            logger.info("🎙️ マイクストリームループ終了。ストリーム停止処理へ...")
-            stream.stop_stream()
-            stream.close()
-            logger.info("🎙️ マイクストリーム正常終了。")
         except Exception as e:
-            logger.exception("😱 _microphone_workerで致命的なエラー")
+            logger.error(f"😱 マイクストリームのオープンまたは実行中にエラー: {e}", exc_info=True)
         finally:
-            if self._is_running: 
-                 logger.info("_microphone_worker の finally でキューにNoneを送信")
-                 asyncio.run_coroutine_threadsafe(self._audio_queue.put(None), self.main_loop)
+            if self.microphone_stream:
+                self.microphone_stream.stop_stream()
+                self.microphone_stream.close()
+                self.microphone_stream = None
+                logger.info("🎤 マイクストリームを停止・クローズしました。")
+            # PyAudioインスタンスの終了は __del__ で行う
+            # p.terminate()
+
+    def _microphone_callback(self, in_data, frame_count, time_info, status):
+        """マイクからの音声データをキューに入れるコールバック"""
+        # このコールバックは別スレッドから呼ばれるので、非同期のputではなくput_nowaitを使う
+        try:
+            # process_audio_chunkを直接呼び出すことでピッチ解析も実行
+            # ただし、async関数なのでスレッドから呼び出すには工夫が必要
+            # ここでは event_loop を使ってコルーチンをスケジュールする
+            asyncio.run_coroutine_threadsafe(
+                self.process_audio_chunk(in_data),
+                self.main_loop
+            )
+        except Exception as e:
+            logger.error(f"マイクコールバックでのキュー追加中にエラー: {e}")
+
+        return (in_data, pyaudio.paContinue)
+
+
+    async def start_transcription_and_evaluation(self):
+        """
+        WebSocketからの音声ストリームを受け付けるためのセッションを開始するよん！
+        """
+        if self._is_running:
+            logger.warning("🖥️ すでにセッションが実行中です。")
+            return
+
+        logger.info("🚀 WebSocketからのリアルタイムセッションを開始します...")
+        self._is_running = True
+        self._stop_event.clear()
+        
+        # --- セッションデータをリセット ---
+        self.full_transcript = ""
+        self.pitch_values = []
+        self.last_pitch_analysis_summary = {}
+        self.last_emotion_analysis_summary = {}
+        # --- ここまで ---
+
+        self._processing_task = asyncio.create_task(self._process_speech_stream())
+        logger.info("🔥 メイン処理ループを開始しました。")
 
     async def start_realtime_transcription_from_mic(self):
         """
-        マイクからのリアルタイム文字起こしを開始するよん！文字起こし結果を非同期で返す。
+        【手動テスト用】マイクから直接音声を取得して、リアルタイム文字起こしと評価を開始するよん！
         """
         if self._is_running:
-            logger.warning("既に実行中だよん！")
+            logger.warning("🎙️ すでにマイクからのセッションが実行中です。")
             return
-
-        logger.info("🚀リアルタイム文字起こし開始準備...")
+        
+        logger.info("🚀 マイクからのリアルタイムセッションを開始します...")
         self._is_running = True
         self._stop_event.clear()
-        while not self._audio_queue.empty():
-            self._audio_queue.get_nowait()
+        
+        # --- セッションデータをリセット ---
+        self.full_transcript = ""
+        self.pitch_values = []
+        self.last_pitch_analysis_summary = {}
+        self.last_emotion_analysis_summary = {}
+        # --- ここまで ---
 
-        # SentimentWorker を開始 (もしあれば)
-        if self.sentiment_worker:
-            logger.info("😊 SentimentWorkerを開始します...")
-            try:
-                # SentimentWorkerのstartは非同期なのでawaitする
-                success = await self.sentiment_worker.start()
-                if success:
-                    logger.info("😊 SentimentWorkerが正常に開始されました。")
-                else:
-                    logger.error("😱 SentimentWorkerの開始に失敗しました。以降の感情分析は行われません。")
-                    # self.sentiment_worker = None # 開始失敗したら無効化も検討
-            except Exception as e:
-                logger.exception("😱 SentimentWorkerのstart呼び出し中にエラーが発生しました。")
-                # self.sentiment_worker = None
+        # メインループを取得
+        self.main_loop = asyncio.get_running_loop()
 
-        loop = asyncio.get_event_loop()
-        self._microphone_task = loop.run_in_executor(None, self._microphone_worker)
-        logger.info("🎧 マイクワーカースレッド開始！")
+        # マイク入力用のワーカースレッドを開始
+        self._microphone_task = threading.Thread(target=self._microphone_worker, daemon=True)
+        self._microphone_task.start()
+        
+        # Speech-to-Textの処理タスクを開始
+        self._processing_task = asyncio.create_task(self._process_speech_stream())
+        logger.info("🔥 マイク音声のメイン処理ループを開始しました。")
 
-        try:
-            responses = await self.speech_client.streaming_recognize(
-                requests=self._microphone_stream_generator()
-            )
-            async for response in responses:
-                if not self._is_running: break
 
-                if not response.results:
-                    continue
-                result = response.results[0]
-                if not result.alternatives:
-                    continue
-                transcript = result.alternatives[0].transcript
-                
-                if result.is_final:
-                    logger.info(f"✨ 最終結果キタコレ！: {transcript}")
-                    # 最終結果テキストをSentimentWorkerに送信
-                    if self.sentiment_worker and self.sentiment_worker._is_running and transcript:
-                        logger.debug(f"感情分析のためにテキスト送信: '{transcript}'")
-                        # send_text_for_analysis は非同期メソッドなので create_task でノンブロッキングに実行
-                        asyncio.create_task(self.sentiment_worker.send_text_for_analysis(transcript))
-                    
-                    # --- Gemini評価をトリガー ---
-                    if self.gemini_enabled and transcript:
-                        logger.info(f"👑 Gemini評価システムに最終回答を送信します: '{transcript[:50]}...'")
-                        # ピッチと感情のサマリーデータを作成 (現在はダミー/部分的)
-                        # TODO: PitchWorkerとSentimentWorkerからの集計データを正しく使う
-                        current_pitch_summary = {
-                            "average_pitch": sum(self.last_pitch_analysis_summary.get("pitches", [0])) / len(self.last_pitch_analysis_summary.get("pitches", [1])) if self.last_pitch_analysis_summary.get("pitches") else "N/A",
-                            "pitch_range": max(self.last_pitch_analysis_summary.get("pitches", [0])) - min(self.last_pitch_analysis_summary.get("pitches", [0])) if self.last_pitch_analysis_summary.get("pitches") else "N/A",
-                            "speaking_rate": "N/A (TODO)", # TODO: 話速計算ロジック
-                            "pause_frequency": "N/A (TODO)", # TODO: ポーズ頻度計算ロジック
-                            "average_pause_duration": "N/A (TODO)" # TODO: 平均ポーズ時間計算ロジック
-                        }
-                        
-                        asyncio.create_task(self._trigger_gemini_evaluation(
-                            self.current_interview_question,
-                            transcript,
-                            current_pitch_summary, # 今はダミーに近い
-                            self.last_emotion_analysis_summary # SentimentWorkerからの結果
-                        ))
-                    # --- ここまでGemini評価トリガー ---
-                    yield transcript 
-                else:
-                    logger.info(f"📝 途中結果: {transcript}")
-
-        except Exception as e:
-            logger.exception("😱 start_realtime_transcription_from_mic 内の streaming_recognize ループでエラー")
-        finally:
-            logger.info("🛑 文字起こし処理ループ終了。stop_realtime_transcription_from_mic を呼び出す準備...")
-            # await self.stop_realtime_transcription_from_mic() # 呼び出し元でやる！
-
-    async def stop_realtime_transcription_from_mic(self):
+    async def stop_transcription_and_evaluation(self):
         """
-        マイク入力と文字起こし処理を停止するよん！
+        文字起こしと評価のセッションを停止し、最終評価を取得するよん！
         """
+        logger.info("⏳ 文字起こしと評価の処理を停止中...")
+
         if not self._is_running:
-            logger.info("もう止まってるよん！")
+            logger.warning("ストリームはすでに停止しています。")
             return
 
-        logger.info("⏳ リアルタイム文字起こし停止処理開始...")
         self._is_running = False
         self._stop_event.set()
 
-        # SentimentWorker を停止 (もしあれば)
-        if self.sentiment_worker and self.sentiment_worker._is_running:
-            logger.info("😊 SentimentWorkerを停止します...")
-            try:
-                # SentimentWorkerのstopは非同期なのでawaitする
-                await self.sentiment_worker.stop()
-                logger.info("😊 SentimentWorkerが正常に停止されました。")
-            except Exception as e:
-                logger.exception("😱 SentimentWorkerのstop呼び出し中にエラーが発生しました。")
+        # マイクストリーミングを停止
+        # マイク用のキューにNoneを入れてジェネレータを止める
+        if self._audio_queue:
+            await self._audio_queue.put(None)
 
-        if self._microphone_task is not None:
-            logger.info("🎤 マイクワーカースレッドの終了待ち...")
+        # メイン処理タスクの完了を待つ
+        if self._processing_task:
             try:
-                await asyncio.wait_for(self._audio_queue.put(None), timeout=1.0)
+                await asyncio.wait_for(self._processing_task, timeout=5.0)
             except asyncio.TimeoutError:
-                logger.warning("audio_queue.put(None) タイムアウト (stop時)")
+                logger.warning("⌛ _processing_task の停止がタイムアウトしました。")
+                self._processing_task.cancel()
             except Exception as e:
-                 logger.error(f"audio_queue.put(None) でエラー (stop時): {e}")
-
-            try:
-                await asyncio.wait_for(self._microphone_task, timeout=5.0)
-                logger.info("🎤 マイクワーカースレッド正常終了！")
-            except asyncio.TimeoutError:
-                logger.warning("🔥 マイクワーカースレッドの終了タイムアウト！")
-            except Exception as e:
-                logger.error(f"🔥 マイクワーカースレッド終了時にエラー: {e}")
-            self._microphone_task = None
+                logger.error(f"😱 _processing_task 停止中にエラー: {e}", exc_info=True)
         
+        # マイクスレッドの停止（手動テスト用）
+        if self._microphone_task and self._microphone_task.is_alive():
+            # この部分は手動テスト用なので、WebSocket経由では直接呼ばれない
+            logger.info("🎤 マイクスレッドの終了を待機中...")
+            # _microphone_worker内のループは_is_runningフラグで終了するはず
+            self._microphone_task.join(timeout=3.0)
+            if self._microphone_task.is_alive():
+                logger.warning("🎤 マイクスレッドの終了がタイムアウトしました。")
+
+
+        # ワーカーを停止
+        await self._stop_workers()
+        logger.info("✅ ワーカーを停止しました。")
+        
+        # --- 最終評価の実行 ---
+        if self.gemini_enabled:
+            logger.info("⏳最終評価をGeminiにリクエスト中...")
+            
+            # ピッチデータのサマリーを作成
+            self._summarize_pitch_data()
+
+            # フロントエンドに評価中であることを通知
+            await self._send_to_client("evaluation_started", {})
+            
+            try:
+                final_evaluation = await gemini_service.get_gemini_evaluation(
+                    interview_question=self.current_interview_question,
+                    transcript=self.full_transcript.strip(),
+                    pitch_analysis=self.last_pitch_analysis_summary,
+                    emotion_analysis=self.last_emotion_analysis_summary,
+                )
+                logger.info(f"👑 Geminiからの最終評価:\n{final_evaluation}")
+
+                # フロントエンドに最終評価を送信
+                await self._send_to_client(
+                    "final_evaluation",
+                    {"evaluation": final_evaluation}
+                )
+
+            except Exception as e:
+                logger.error(f"😱 Geminiへの評価リクエスト中にエラーが発生: {e}", exc_info=True)
+                await self._send_to_client(
+                    "error",
+                    {"message": f"Gemini評価中にエラーが発生しました: {e}"}
+                )
+        else:
+            logger.warning("😢 Gemini評価は無効なため、最終評価はスキップされました。")
+
+        logger.info("✅ すべてのセッション処理が完了しました。")
+
+        # リソースのクリーンアップ
+        self._stop_event.clear()
+        self._processing_task = None
+        self._microphone_task = None
+        # キューをクリアする
         while not self._audio_queue.empty():
-            try:
-                self._audio_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-        
-        logger.info("✅ リアルタイム文字起こし停止完了！")
+            self._audio_queue.get_nowait()
+            
+    def _summarize_pitch_data(self):
+        """セッション中に収集したピッチデータを要約して、last_pitch_analysis_summaryを更新する"""
+        if not self.pitch_values:
+            logger.info("ピッチデータが収集されなかったので、ピッチの要約はスキップします。")
+            self.last_pitch_analysis_summary = {
+                "average_pitch": "データなし",
+                "pitch_variation": "データなし",
+                "pitch_stability": "データなし",
+                "min_pitch": "データなし",
+                "max_pitch": "データなし",
+            }
+            return
+
+        try:
+            import numpy as np
+            
+            # NumPy配列に変換
+            pitch_array = np.array(self.pitch_values)
+            
+            # 平均ピッチ
+            avg_pitch = np.mean(pitch_array)
+            # ピッチの標準偏差（変動）
+            std_dev_pitch = np.std(pitch_array)
+            # ピッチの安定性（変動係数） - 平均に対する変動の割合
+            # avg_pitchが0の場合のゼロ除算を避ける
+            cv_pitch = (std_dev_pitch / avg_pitch) * 100 if avg_pitch > 0 else 0
+            # 最小・最大ピッチ
+            min_pitch = np.min(pitch_array)
+            max_pitch = np.max(pitch_array)
+
+            self.last_pitch_analysis_summary = {
+                "average_pitch": f"{avg_pitch:.2f} Hz",
+                "pitch_variation": f"{std_dev_pitch:.2f} Hz (標準偏差)",
+                "pitch_stability": f"{cv_pitch:.2f} % (変動係数)",
+                "min_pitch": f"{min_pitch:.2f} Hz",
+                "max_pitch": f"{max_pitch:.2f} Hz",
+            }
+            logger.info(f"🎤 ピッチデータの要約完了: {self.last_pitch_analysis_summary}")
+
+        except ImportError:
+            logger.warning("NumPyがインストールされていないため、ピッチの統計情報を計算できません。")
+            self.last_pitch_analysis_summary = {"error": "NumPy not found"}
+        except Exception as e:
+            logger.error(f"ピッチデータの要約中にエラーが発生しました: {e}", exc_info=True)
+            self.last_pitch_analysis_summary = {"error": str(e)}
+
 
     def __del__(self):
-        """
-        オブジェクトが消えるときにPyAudioリソースを解放するよん
-        """
-        if hasattr(self, 'pyaudio_instance') and self.pyaudio_instance:
-            logger.info("💨 PyAudioインスタンスを解放します...")
+        # オブジェクトが破棄されるときにPyAudioをクリーンアップ
+        if self.pyaudio_instance:
+            logger.info("PyAudioインスタンスを解放します。")
             self.pyaudio_instance.terminate()
-            logger.info("💨 PyAudioインスタンス解放完了！")
-        # SentimentWorkerのaiohttpセッションもここで確実に閉じることを検討
-        # ただし、非同期のstopメソッドで処理するのが望ましい
-        # if hasattr(self, 'sentiment_worker') and self.sentiment_worker:
-        #     if hasattr(self.sentiment_worker, '_aiohttp_session') and self.sentiment_worker._aiohttp_session:
-        #         if not self.sentiment_worker._aiohttp_session.closed:
-        #             # 非同期メソッドを __del__ から呼ぶのは難しいので、通常は stop で処理すべき
-        #             logger.warning("SentimentWorkerのaiohttpセッションが __del__ でまだ開いています。プログラム終了前にstopを呼んでください。")
-
-    # --- Gemini評価システム用のメソッド追加 ---
-    def set_interview_question(self, question: str):
-        """現在の面接の質問を設定するよん！"""
-        self.current_interview_question = question
-        logger.info(f"🎤 設定された面接の質問: {question}")
-
-    async def _trigger_gemini_evaluation(
-        self,
-        interview_question: str,
-        transcript: str,
-        pitch_analysis: dict,
-        emotion_analysis: dict
-    ):
-        """Gemini評価APIを呼び出し、結果をログに出力する内部メソッド"""
-        logger.info("👑 Gemini評価処理を開始します...")
-        evaluation_result_text = await get_gemini_evaluation(
-            interview_question,
-            transcript,
-            pitch_analysis,
-            emotion_analysis
-        )
-        if evaluation_result_text:
-            parsed_evaluation = parse_gemini_response_data(evaluation_result_text)
-            logger.info("--- ✨👑 Gemini AI面接評価結果 👑✨ ---")
-            # JSON形式でログ出力すると見やすいかも！
-            try:
-                # 評価結果がもしJSON文字列なら、整形して表示試みる
-                # 今回はparse_gemini_response_dataがdictを返すのでそのまま表示
-                logger.info(json.dumps(parsed_evaluation, indent=2, ensure_ascii=False))
-            except json.JSONDecodeError:
-                logger.info(parsed_evaluation.get("raw_evaluation", "解析済みデータなし")) # 生のテキストを表示
-            logger.info("--- 👑 Gemini評価終了 👑 ---")
-            # TODO: 必要であれば、この評価結果をどこかに保存したり、UIに通知したりする処理を追加
-        else:
-            logger.error("😢 Geminiからの評価取得に失敗しました。")
-    # --- ここまでGemini評価システム用メソッド ---
-
-
-async def main():
-    # logger.setLevel(logging.DEBUG) # デバッグログも見たい場合は、ここで一時的にレベル変更！
-    logger.info("🚀 メイン処理開始！ SpeechProcessorのテストだよん！")
-    
-    # 環境変数 GOOGLE_APPLICATION_CREDENTIALS が設定されているか確認
-    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-        logger.warning("⚠️ 環境変数 GOOGLE_APPLICATION_CREDENTIALS が設定されていません。")
-        logger.warning("   Google Cloud Natural Language API の認証に失敗し、感情分析が機能しない可能性があります。")
-        logger.warning("   設定例: export GOOGLE_APPLICATION_CREDENTIALS=\"/path/to/your/keyfile.json\"")
-        # SentimentWorkerの初期化は language_client が None になるだけで、エラーにはならないはずだから処理は続行
-
-    processor = SpeechProcessor()
-
-    try:
-        logger.info("マイクからの文字起こしを開始します (約20秒間)...")
-        processor.set_interview_question("あなたの最大の強みと、それをどのように仕事に活かせるか教えてください。") # テスト用の質問を設定
-
-        async def transcribe_task_wrapper():
-            # transcribe_task内からprocessorの状態を参照できるようにする
-            nonlocal processor 
-            async for transcript in processor.start_realtime_transcription_from_mic():
-                # logger.info(f"📢 メイン受信 (最終結果): {transcript}") # これは SpeechProcessor 側でログ出力
-                if not processor._is_running: 
-                    break
-        
-        transcription_coro = transcribe_task_wrapper()
-        main_task = asyncio.create_task(transcription_coro)
-        
-        await asyncio.sleep(20) # 20秒間実行
-        logger.info("\n⏳ 20秒経過、文字起こしを停止します...\n")
-        
-    except KeyboardInterrupt:
-        logger.info("\n🛑 Ctrl+C を検知！処理を中断します...")
-    except Exception as e:
-        logger.exception(f"😱 メイン処理で予期せぬエラー: {e}")
-    finally:
-        logger.info("🧹 クリーンアップ処理開始...")
-        if hasattr(processor, '_is_running') and processor._is_running:
-             await processor.stop_realtime_transcription_from_mic()
-        
-        # PyAudioインスタンスの解放は __del__ に任せるか、明示的に呼ぶ
-        if hasattr(processor, 'pyaudio_instance') and processor.pyaudio_instance:
-             processor.pyaudio_instance.terminate() 
-        logger.info("👋 メイン処理完了！またね～！")
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logger.exception(f"😱 asyncio.runでエラー発生！: {e}")
-        logger.error("💡 もしかして: Google Cloud の認証設定してないとか？")
-        logger.error("   gcloud auth application-default login とか試してみてね！") 
+            self.pyaudio_instance = None

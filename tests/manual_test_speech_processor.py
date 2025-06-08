@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import json
 
 # このスクリプト (manual_test_speech_processor.py) があるディレクトリを取得
 current_script_dir = os.path.dirname(os.path.abspath(__file__)) # .../tests/
@@ -43,65 +44,50 @@ async def run_mic_test():
     print("-" * 30)
 
     processor = SpeechProcessor()
-    test_interview_question = "自己PRを1分程度でお願いします。あなたの強みや経験、そしてこのAI面接システムを開発する上で最も挑戦的だったことは何ですか？"
+    # テストスクリプトからはクライアントに送信する機能はないので、ダミーのコールバックを設定
+    async def dummy_send_to_client(data):
+        # 評価結果などをコンソールに出力する
+        if data.get("type") == "gemini_feedback":
+            print("--- ✨👑 Gemini AI面接評価結果 (手動テスト) 👑✨ ---")
+            print(json.dumps(data.get("payload", {}), indent=2, ensure_ascii=False))
+            print("--- 👑 Gemini評価終了 👑 ---")
+        else:
+            print(f"[TO_CLIENT_DUMMY] {data}")
+
+    processor.set_send_to_client_callback(dummy_send_to_client)
+
+    test_interview_question = "自己PRを1分程度でお願いします。"
     print(f"[テストスクリプト] SpeechProcessorに面接の質問を設定します: '{test_interview_question}'")
     processor.set_interview_question(test_interview_question)
 
-    stop_keyword = "終了" # このキーワードで止まるようにするよん！
+    stop_keyword = "終了"
     should_stop = False
+    transcription_task = None
 
     try:
-        async def transcription_loop():
-            nonlocal should_stop
-            
-            # processor.start_realtime_transcription_from_mic() の結果を一旦変数に入れる
-            stream_iterator = processor.start_realtime_transcription_from_mic()
-            print(f"🔍 stream_iterator の型: {type(stream_iterator)}") # 型をプリント！
-            print(f"🔍 hasattr(__aiter__): {hasattr(stream_iterator, '__aiter__')}") # __aiter__ 持ってるか確認！
+        # マイクからの文字起こしを開始
+        # この関数はすぐにリターンし、バックグラウンドで処理を開始する
+        await processor.start_realtime_transcription_from_mic()
 
-            async for transcript in stream_iterator: # 変数を使ってループ
-                if not processor._is_running: # processor 内部で停止されたら抜ける
-                    print("🔄 processor が停止したからループ抜けるね！")
-                    break
-                
-                print(f"📢 文字起こし結果: {transcript}")
-                if stop_keyword in transcript:
-                    print(f"🔍 「{stop_keyword}」を検知！そろそろ終わるね...")
-                    should_stop = True
-                    break # ループを抜けて停止処理へ
-
-        # 文字起こしループをタスクとして実行
-        transcription_task = asyncio.create_task(transcription_loop())
-
-        while not should_stop and not transcription_task.done():
-            await asyncio.sleep(0.1) # ちょっと待って、Ctrl+Cとかの割り込みをチェック
-
-        if transcription_task.done() and transcription_task.exception():
-            # タスク内で例外が発生した場合
-            print(f"😱 文字起こしタスクでエラー発生: {transcription_task.exception()}")
-
+        print("🎤 話し始めてください。約30秒後に自動で停止します。")
+        
+        # 30秒間、処理を続ける
+        await asyncio.sleep(30)
 
     except KeyboardInterrupt:
         print("\n🛑 Ctrl+C を検知！処理を優雅に中断するよ...")
     except Exception as e:
         print(f"😱 テスト実行中に予期せぬエラーが発生しちゃった: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        print("\n⏳ 文字起こし処理を停止中...")
-        if hasattr(processor, '_is_running') and processor._is_running:
-            await processor.stop_realtime_transcription_from_mic()
+        print("\n⏳ 文字起こしと評価の処理を停止中...")
+        await processor.stop_transcription_and_evaluation()
         
-        # PyAudioインスタンスの解放 (念のため)
-        # SpeechProcessorの__del__でも呼ばれるけど、明示的に呼んでおくと安心！
+        # PyAudioインスタンスの解放
         if hasattr(processor, 'pyaudio_instance') and processor.pyaudio_instance:
-            try:
-                # PyAudioのterminate()は非同期じゃないので、イベントループが動いてるうちに呼ぶ
-                if asyncio.get_event_loop().is_running():
-                     await asyncio.to_thread(processor.pyaudio_instance.terminate)
-                else:
-                    processor.pyaudio_instance.terminate()
-                print("💨 PyAudioインスタンス、ちゃんと解放したよ！")
-            except Exception as e:
-                print(f"🤔 PyAudio解放中にちょっとエラー: {e}")
+            processor.pyaudio_instance.terminate()
+            print("💨 PyAudioインスタンス、ちゃんと解放したよ！")
 
         print("👋 テスト完了！お疲れ様でした～！")
 
