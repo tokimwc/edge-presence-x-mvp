@@ -2,6 +2,7 @@
 import InterviewControls from './InterviewControls.vue';
 import TranscriptionPanel from './TranscriptionPanel.vue';
 import FeedbackPanel from './FeedbackPanel.vue';
+import AvatarView from './AvatarView.vue';
 import { useInterviewStore } from '../stores/interview';
 import { onMounted } from 'vue';
 
@@ -23,7 +24,7 @@ onMounted(() => {
           <InterviewControls />
         </div>
       </div>
-      <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-6 h-[calc(100vh-200px)]">
+      <div v-else class="grid grid-cols-1 md:grid-cols-3 gap-6 h-[calc(100vh-200px)]">
         <div>
           <h2 class="text-xl font-semibold text-gray-800 mb-4">リアルタイム文字起こし</h2>
           <TranscriptionPanel />
@@ -32,7 +33,11 @@ onMounted(() => {
           <h2 class="text-xl font-semibold text-gray-800 mb-4">AIフィードバック</h2>
           <FeedbackPanel />
         </div>
-        <div class="md:col-span-2 mt-4">
+        <div>
+          <h2 class="text-xl font-semibold text-gray-800 mb-4">アバター</h2>
+          <AvatarView />
+        </div>
+        <div class="md:col-span-3 mt-4">
           <InterviewControls />
         </div>
       </div>
