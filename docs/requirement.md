@@ -154,6 +154,61 @@
 
 ---
 
+## 13. GUI & 3D アバター拡張要件（V1.1）
+
+### 13.1 目的
+* Zoom／Teams 風 UI を模倣し、ユーザーが **「本番さながらの面接環境」** を体験できる視覚・聴覚インターフェースを提供する。  
+* 3D アバターがユーザーまたは AI 面接官の音声に同期して **口パク（リップシンク）・瞬き・軽いジェスチャー** を行い、臨場感を向上させる。
+
+### 13.2 機能要件
+| ID | 要件 | 詳細 |
+|----|------|------|
+| GUI-1 | 画面レイアウト | `MeetingView` コンポーネントで <video> 領域・自分のプレビュー小窓・コントロールバー(ミュート・カメラ・退出)を表示する。Zoom/Teams 風のダーク UI を CSS で再現 |
+| GUI-2 | ステータスオーバーレイ | 右側に AI フィードバックパネル（信号灯 & 改善カード）を PIP 表示し、3 秒毎に更新する。 |
+| AVA-1 | アバター読み込み | Ready Player Me で生成した GLB/VRM を Three.js Loader で読み込み、シーンに配置 |
+| AVA-2 | リップシンク | Web Audio API で取得した音声の **振幅** をモーフターゲット “JawOpen” にマッピングし 60 fps で更新 |
+| AVA-3 | モーション | 待機時はあらかじめ設定した idle アニメーションをループ再生。DeepMotion の Animate 3D API から取得した BVH を適宜適用可能とする |
+| TTS-1 | 音声合成 | 面接官の質問文を Web Speech API `speechSynthesis` または Google TTS で合成し再生 |
+| INT-1 | Vue 連携 | Three.js の初期化・レンダリングを `AvatarCanvas.vue` として分離し、Vue ライフサイクルでメモリ管理 |
+| ALT-1 | 代替レンダラ | Babylon.js でもレンダリング可能なクラス構成とし、ライブラリ切替が容易な抽象化インターフェースを提供 |
+
+### 13.3 非機能要件（追加）
+* **描画性能:** 1080p／60 fps で FPS > 50 を維持（M1 MacBook Air 相当）。  
+* **ロード時間:** アバター初回ロード < 2 s（GLB 2 MB 以下、gzip 圧縮）
+* **ブラウザ互換:** Chrome 115+ / Edge 115+ / Safari 17+。  
+* **拡張性:** 将来 Flutter Web 移植を見据え、Three.js 依存ロジックを `lib/3d/` に隔離。
+
+### 13.4 受入条件
+* マイク入力の音量に比例して口モーフが 3 段階以上変化し、動画キャプチャで目視確認できること
+* GUI 操作（ミュート・カメラ OFF）が CSS で即時反映し、状態がダッシュボード側にも通知されること。  
+* MVP デモ環境でユーザ 3 名が「臨場感がある」と回答（5 段階アンケート平均 ≧ 4）。
+
+---
+
+## 14. 技術スタック選定補足
+
+### 14.1 フロントエンド: Vue 継続 vs Flutter Web
+* **Vue 3 + Vite** は既存コード再利用と WebGL 連携の豊富な資料が強み。
+* Flutter Web は一貫した UI フレームワークだが、WebRTC・Three.js 連携は追加プラグインを要しハッカソン期間のリスクが高いため V1.1 では採用しない。将来モバイル展開時に再評価。
+
+### 14.2 3D レンダラ: Three.js 優先
+* Three.js は VRM, GLTF, srcAlphaBlending 等の実装が豊富でコミュニティサポートも活発。
+* Babylon.js は GUI ウィジェットや PBR が充実するが lipsync は自前実装が前提。
+* よって **Three.js + VRM Loader + TresJS (Vue ラッパ)** を推奨。
+
+---
+
+## 15. オープン課題 & 次期スプリント候補
+
+| カテゴリ | 課題 | 解決案 |
+|----------|------|-------|
+| **リップシンク精度** | 音量ベースでは母音区別が粗い | Whisper などで 200 ms ウィンドウ文字起こし → 音素 → Viseme 変換を検証 |
+| **モーション多様性** | DeepMotion API はジョブ完了まで数秒遅延 | 短尺ジェスチャーを事前生成し組み合わせるプリセット方式にフォールバック |
+| **Flutter 移行調査** | WebGL wrapper, WebRTC plugin の成熟度 | `flutter_unity_widget` + WebGL export の PoC を次期計画に設定 |
+| **ライセンス確認** | Ready Player Me アバターデータの商用条件 | RPM FAQ を精査、MIT/GPL 両立可否をレポート化 |
+
+---
+
 
 [1]: https://www.theverge.com/news/635176/otter-ai-voice-activated-meeting-agent-availability?utm_source=chatgpt.com "Otter's new AI agent can speak up in meetings"
 [2]: https://www.linkedin.com/help/linkedin/answer/a1605896/-ai-?lang=ja-JP&utm_source=chatgpt.com "AIのフィードバックを即座に取得して、面接の回答を改善します"
