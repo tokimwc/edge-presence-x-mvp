@@ -25,6 +25,10 @@ export class AvatarController {
   private blinkTimer = 0;
   private nextBlink = 2 + Math.random() * 3;
 
+  get vrmModel() {
+    return this.vrm;
+  }
+
   constructor(private canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
@@ -42,10 +46,12 @@ export class AvatarController {
     this.loader = new GLTFLoader();
     this.loader.register((parser) => new VRMLoaderPlugin(parser));
 
-    const light = new THREE.DirectionalLight(0xffffff, 1.0);
-    light.position.set(1, 1, 1);
-    this.scene.add(light);
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    const amb = new THREE.AmbientLight(0xffffff, 1.2)
+    const dir = new THREE.DirectionalLight(0xffffff, 3)
+    dir.position.set(2, 3, 5)
+    this.scene.add(amb, dir)
+    this.renderer.outputEncoding = THREE.sRGBEncoding
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
 
     this.scene.add(this.lookAtTarget);
   }

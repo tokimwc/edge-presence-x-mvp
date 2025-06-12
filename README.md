@@ -172,6 +172,12 @@ python tests/manual_test_speech_processor.py
 ```
 マイクに向かって話しかけると、リアルタイムで文字起こしとAIによる評価がターミナルに表示されます。
 
+## Avatar Module
+
+Three.js と VRM を用いたアバター表示は `AvatarCanvas.vue` で管理します。内部では
+`IdleAnimation` と `LipSync` クラスが実行され、マイク入力から口パクを生成します。
+`avatar/reset` イベントを受け取ると、各クラスと WebGL リソースが解放されます。
+
 ## 🎖️ ハッカソン目標
 
 **Google Cloud Japan AI Hackathon Vol.2** 参加プロジェクト

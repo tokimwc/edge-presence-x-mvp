@@ -2,7 +2,7 @@
 import InterviewControls from './InterviewControls.vue';
 import TranscriptionPanel from './TranscriptionPanel.vue';
 import FeedbackPanel from './FeedbackPanel.vue';
-import AvatarView from './AvatarView.vue';
+import AvatarCanvas from './AvatarCanvas.vue';
 import { useInterviewStore } from '../stores/interview';
 import { onMounted } from 'vue';
 
@@ -35,7 +35,7 @@ onMounted(() => {
         </div>
         <div>
           <h2 class="text-xl font-semibold text-gray-800 mb-4">アバター</h2>
-          <AvatarView />
+          <AvatarCanvas />
         </div>
         <div class="md:col-span-3 mt-4">
           <InterviewControls />

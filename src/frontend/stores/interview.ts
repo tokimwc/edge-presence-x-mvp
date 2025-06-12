@@ -223,8 +223,20 @@ export const useInterviewStore = defineStore('interview', () => {
         }
       };
 
+      const analyser = audioContext.createAnalyser();
+      source.connect(analyser);
+      if (import.meta.env.VITE_DEBUG_AUDIO === 'true') {
+        const debugGain = audioContext.createGain();
+        debugGain.gain.value = 0;
+        analyser.connect(debugGain).connect(audioContext.destination);
+      }
+
       source.connect(processor);
-      processor.connect(audioContext.destination);
+      if (import.meta.env.VITE_DEBUG_AUDIO === 'true') {
+        const dbg = audioContext.createGain();
+        dbg.gain.value = 0;
+        processor.connect(dbg).connect(audioContext.destination);
+      }
       console.log("🎤 マイクの準備OK！音声ストリーミング開始！");
 
     } catch (e) {
@@ -302,6 +314,9 @@ export const useInterviewStore = defineStore('interview', () => {
         errorMessage.value = "サーバーに接続されていないため、面接を正常に終了できません。";
         isEvaluating.value = false; // エラー時は評価中にしない
     }
+
+    // notify avatar modules to cleanup
+    window.dispatchEvent(new Event('avatar/reset'))
   }
 
   return {
