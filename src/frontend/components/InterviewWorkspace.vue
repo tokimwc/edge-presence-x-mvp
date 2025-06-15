@@ -4,9 +4,20 @@ import TranscriptionPanel from './TranscriptionPanel.vue';
 import FeedbackPanel from './FeedbackPanel.vue';
 import AvatarCanvas from './AvatarCanvas.vue';
 import { useInterviewStore } from '../stores/interview';
-import { onMounted } from 'vue';
+import { onMounted, ref, watch } from 'vue';
 
 const interviewStore = useInterviewStore();
+
+const localVideo = ref<HTMLVideoElement | null>(null);
+
+watch(
+  () => interviewStore.localStream,
+  (s) => {
+    if (s && localVideo.value) {
+      localVideo.value.srcObject = s;
+    }
+  }
+);
 
 // コンポーネントがマウントされたらWebSocketに接続する
 onMounted(() => {
@@ -24,21 +35,28 @@ onMounted(() => {
           <InterviewControls />
         </div>
       </div>
-      <div v-else class="grid grid-cols-1 md:grid-cols-3 gap-6 h-[calc(100vh-200px)]">
-        <div>
-          <h2 class="text-xl font-semibold text-gray-800 mb-4">リアルタイム文字起こし</h2>
-          <TranscriptionPanel />
-        </div>
-        <div>
-          <h2 class="text-xl font-semibold text-gray-800 mb-4">AIフィードバック</h2>
-          <FeedbackPanel />
-        </div>
-        <div>
-          <h2 class="text-xl font-semibold text-gray-800 mb-4">アバター</h2>
-          <AvatarCanvas />
-        </div>
-        <div class="md:col-span-3 mt-4">
-          <InterviewControls />
+      <div v-else>
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 h-[calc(100vh-140px)]">
+          <div class="relative md:col-span-3 flex items-center justify-center bg-black rounded-lg">
+            <AvatarCanvas class="w-full h-full" />
+            <video
+              v-if="interviewStore.localStream"
+              ref="localVideo"
+              class="absolute top-4 right-4 w-40 aspect-video rounded shadow-lg border-2 border-white"
+              autoplay
+              playsinline
+              muted
+            />
+          </div>
+          <div class="md:col-span-1 flex flex-col h-full overflow-hidden">
+            <div class="flex-1 overflow-y-auto space-y-6">
+              <TranscriptionPanel />
+              <FeedbackPanel />
+            </div>
+          </div>
+          <div class="md:col-span-4 mt-4 flex justify-center">
+            <InterviewControls />
+          </div>
         </div>
       </div>
     </div>

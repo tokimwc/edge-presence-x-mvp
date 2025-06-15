@@ -25,6 +25,7 @@ let stream: MediaStream | null = null;
 let processor: ScriptProcessorNode | null = null;
 const SAMPLE_RATE = 16000; // バックエンドの期待値に合わせる
 const audioStream = ref<MediaStream | null>(null);
+const localStream = ref<MediaStream | null>(null);
 
 export const useInterviewStore = defineStore('interview', () => {
   /**
@@ -203,8 +204,9 @@ export const useInterviewStore = defineStore('interview', () => {
        return;
     }
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
       audioStream.value = stream;
+      localStream.value = stream;
       audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
       const source = audioContext.createMediaStreamSource(stream);
       processor = audioContext.createScriptProcessor(4096, 1, 1);
@@ -261,6 +263,7 @@ export const useInterviewStore = defineStore('interview', () => {
     }
     stream = null;
     audioStream.value = null;
+    localStream.value = null;
     audioContext = null;
     processor = null;
     console.log("🛑 音声ストリーミングを停止しました。");
@@ -305,6 +308,10 @@ export const useInterviewStore = defineStore('interview', () => {
     
     // オーディオストリーミングを停止
     stopAudioStreaming();
+    if (localStream.value) {
+      localStream.value.getTracks().forEach(t => t.stop());
+      localStream.value = null;
+    }
 
     // サーバーに停止を通知
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -331,5 +338,6 @@ export const useInterviewStore = defineStore('interview', () => {
     startInterview,
     stopInterview,
     audioStream,
+    localStream,
   };
-}); 
+});
