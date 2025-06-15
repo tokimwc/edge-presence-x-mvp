@@ -51,6 +51,11 @@ async def websocket_handler(websocket: WebSocket):
     try:
         while True:
             message = await websocket.receive()
+            
+            if message.get("type") == "websocket.disconnect":
+                logger.info(f"👋 クライアントからの切断メッセージ受信 (code: {message.get('code', 'N/A')})。ループを抜けます。")
+                break
+
             if 'text' in message:
                 data = json.loads(message['text'])
                 logger.info(f"クライアントからJSONメッセージ受信: {data}")
@@ -65,7 +70,7 @@ async def websocket_handler(websocket: WebSocket):
                 audio_chunk = message['bytes']
                 await speech_processor.process_audio_chunk(audio_chunk)
     except WebSocketDisconnect:
-        logger.info(f"👋 クライアントが接続を切断しました (code: {websocket.client_state})。")
+        logger.warning(f"👋 クライアント接続が予期せず切れました。")
     except Exception as e:
         logger.error(f"😱 WebSocketハンドラで予期せぬエラーが発生: {e}", exc_info=True)
     finally:

@@ -1,5 +1,6 @@
 # ここに Google Cloud Speech-to-Text のライブラリをインポートする感じで！
 from google.cloud import speech_v1p1beta1 as speech # 非同期クライアントを使うよ！
+from google.api_core import exceptions
 import asyncio
 import pyaudio
 import logging # logging モジュールをインポート
@@ -203,6 +204,7 @@ class SpeechProcessor:
             # 3. レスポンスを非同期で処理
             async for response in responses_iterator:
                 if not self._is_running:
+                    logger.info("is_runningがFalseになったため、レスポンス処理ループを中断します。")
                     break
 
                 # --- デバッグログ: レスポンス全体を出力 ---
@@ -235,9 +237,19 @@ class SpeechProcessor:
                         "interim_transcript",
                         {"transcript": transcript}
                     )
+        except asyncio.CancelledError:
+            logger.info("🚫 _process_speech_stream タスクがキャンセルされました。")
+            # キャンセル時は速やかに終了
+            raise
+        except StopAsyncIteration:
+             logger.info("ストリームが正常に終了しました。")
+        except exceptions.OutOfRange as e:
+            # 音声タイムアウトエラーをここでキャッチ！
+            logger.error(f"😱 音声タイムアウトエラーが発生しました: {e}")
+            await self._send_to_client("error", {"message": "長時間音声が検出されなかったため、タイムアウトしました。"})
         except Exception as e:
-            logger.error(f"😱 _process_speech_streamでエラー発生！: {e}", exc_info=True)
-            await self._send_to_client("error", {"message": f"音声処理中にエラーが発生しました: {e}"})
+            logger.error(f"😱 _process_speech_streamで予期せぬエラー発生！: {e}", exc_info=True)
+            await self._send_to_client("error", {"message": f"音声処理中に予期せぬエラーが発生しました: {e}"})
         finally:
             logger.info("🏁 _process_speech_stream ループが終了しました。")
             # ここではワーカーを止めない。stop_transcription_and_evaluationで制御する。
