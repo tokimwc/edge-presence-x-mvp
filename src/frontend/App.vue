@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import InterviewLayout from './components/InterviewLayout.vue';
+// No script needed for this basic setup
 </script>
 
 <template>
-  <div class="bg-gray-50 min-h-screen">
-    <InterviewLayout />
-  </div>
+  <v-app>
+    <router-view />
+  </v-app>
 </template> 

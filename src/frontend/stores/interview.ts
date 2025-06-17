@@ -18,6 +18,17 @@ export interface Evaluation {
   feedback: string;
 }
 
+export interface PitchData {
+  timestamp: number;
+  pitch: number;
+}
+
+export interface SentimentData {
+  timestamp: number;
+  score: number;
+  magnitude: number;
+}
+
 // --- Audio Streaming ---
 // グローバルスコープで宣言して、複数の関数からアクセスできるようにする
 let audioContext: AudioContext | null = null;
@@ -45,6 +56,18 @@ export const useInterviewStore = defineStore('interview', () => {
    * @type {import('vue').Ref<Evaluation[]>}
    */
   const evaluations = ref<Evaluation[]>([]);
+
+  /**
+   * ピッチデータの履歴
+   * @type {import('vue').Ref<PitchData[]>}
+   */
+  const pitchHistory = ref<PitchData[]>([]);
+
+  /**
+   * 感情分析データの履歴
+   * @type {import('vue').Ref<SentimentData[]>}
+   */
+  const sentimentHistory = ref<SentimentData[]>([]);
 
   /**
    * 面接がアクティブかどうか
@@ -125,10 +148,26 @@ export const useInterviewStore = defineStore('interview', () => {
         });
         break;
       case 'pitch_analysis':
-         evaluations.value.push({ type: 'ピッチ分析', score: 0, feedback: JSON.stringify(message.payload) });
+        const newPitchData: PitchData = {
+          timestamp: message.payload.timestamp,
+          pitch: message.payload.pitch,
+        };
+        pitchHistory.value.push(newPitchData);
+        // Optional: Keep the array from growing indefinitely
+        if (pitchHistory.value.length > 200) {
+          pitchHistory.value.shift();
+        }
         break;
       case 'sentiment_analysis':
-        evaluations.value.push({ type: '感情分析', score: message.payload.emotions?.score || 0, feedback: `感情スコア: ${message.payload.emotions?.score}, 強さ: ${message.payload.emotions?.magnitude}` });
+        const newSentimentData: SentimentData = {
+          timestamp: Date.now(),
+          score: message.payload.emotions?.score || 0,
+          magnitude: message.payload.emotions?.magnitude || 0,
+        };
+        sentimentHistory.value.push(newSentimentData);
+        if (sentimentHistory.value.length > 200) {
+          sentimentHistory.value.shift();
+        }
         break;
       case 'error':
         errorMessage.value = `サーバーエラー: ${message.payload.message}`;
@@ -298,35 +337,33 @@ export const useInterviewStore = defineStore('interview', () => {
    * 面接を終了し、最終評価をリクエストします。
    */
   function stopInterview() {
-    if (!isInterviewActive.value) return;
+    if (isInterviewActive.value) {
+      console.log('🗣️ 面接セッションを終了します。');
+      isInterviewActive.value = false;
+      // Clear history for the next session
+      transcriptions.value = [];
+      evaluations.value = [];
+      pitchHistory.value = [];
+      sentimentHistory.value = [];
 
-    // UI即時反映のために先にフラグを倒す
-    isInterviewActive.value = false;
-    
-    // オーディオストリーミングを停止
-    stopAudioStreaming();
-    if (localStream.value) {
-      localStream.value.getTracks().forEach(t => t.stop());
-      localStream.value = null;
-    }
-
-    // サーバーに停止を通知
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      console.log('📤 面接終了をサーバーに通知します。');
-      socket.send(JSON.stringify({ action: 'stop' }));
-    } else {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'end_session' }));
+      } else {
         errorMessage.value = "サーバーに接続されていないため、面接を正常に終了できません。";
         isEvaluating.value = false; // エラー時は評価中にしない
-    }
+      }
 
-    // notify avatar modules to cleanup
-    window.dispatchEvent(new Event('avatar/reset'))
+      // notify avatar modules to cleanup
+      window.dispatchEvent(new Event('avatar/reset'))
+    }
   }
 
   return {
     connectionState,
     transcriptions,
     evaluations,
+    pitchHistory,
+    sentimentHistory,
     isInterviewActive,
     isEvaluating,
     errorMessage,
