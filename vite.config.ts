@@ -11,6 +11,7 @@ export default defineConfig({
       autoImport: true,
     }),
   ],
+  publicDir: 'src/frontend/public',
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src')

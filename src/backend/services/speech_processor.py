@@ -114,7 +114,8 @@ class SpeechProcessor:
                 # logger.debug(f"🎤 検出されたピッチ: {pitch:.2f} Hz") # デバッグ用に便利
 
         # 2. 文字起こし用のキューに音声データを追加
-        await self._audio_queue.put(chunk)
+        if not self._stop_event.is_set():
+            await self._audio_queue.put(chunk)
 
     async def _start_workers(self):
         """感情分析ワーカーを起動するよん！"""
@@ -203,12 +204,9 @@ class SpeechProcessor:
 
             # 3. レスポンスを非同期で処理
             async for response in responses_iterator:
-                if not self._is_running:
-                    logger.info("is_runningがFalseになったため、レスポンス処理ループを中断します。")
+                if not self._is_running or self._stop_event.is_set():
+                    logger.info("is_runningがFalseまたはstop_eventがセットされたため、レスポンス処理ループを中断します。")
                     break
-
-                # --- デバッグログ: レスポンス全体を出力 ---
-                # logger.debug(f"Googleからのレスポンス受信: {response}")
 
                 if not response.results:
                     continue
@@ -248,56 +246,55 @@ class SpeechProcessor:
             logger.error(f"😱 音声タイムアウトエラーが発生しました: {e}")
             await self._send_to_client("error", {"message": "長時間音声が検出されなかったため、タイムアウトしました。"})
         except Exception as e:
-            logger.error(f"😱 _process_speech_streamで予期せぬエラー発生！: {e}", exc_info=True)
+            logger.error(f"😱 _process_speech_streamで予期せぬエラー発生: {e}", exc_info=True)
             await self._send_to_client("error", {"message": f"音声処理中に予期せぬエラーが発生しました: {e}"})
         finally:
             logger.info("🏁 _process_speech_stream ループが終了しました。")
-            # ここではワーカーを止めない。stop_transcription_and_evaluationで制御する。
+            # ここでワーカーを停止するのが確実！
+            await self._stop_workers()
 
     async def _microphone_stream_generator(self):
         """
-        キューからの音声データを非同期で供給するジェネレータだよん！
-        Speech-to-Text API が期待する StreamingRecognitionConfig と音声チャンクを yield する。
+        キューから音声データを読み取ってGoogle APIにストリーミングする非同期ジェネレータ。
+        WebSocketからのリアルタイム音声入力に対応してるよん！
         """
+        # 1. 最初にストリーミング設定を送信
+        recognition_config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=RATE,
+            language_code="ja-JP",
+            enable_automatic_punctuation=True,
+            # モデル選択: 'telephony'か'medical_conversation'などが用途に合わせて選べる
+            # 'default' もあるけど、今回は汎用的な 'latest_long' を試してみる
+            model="latest_long", 
+            use_enhanced=True, # 高度な音声認識モデルを有効化
+        )
         streaming_config = speech.StreamingRecognitionConfig(
-            config=speech.RecognitionConfig(
-                encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-                sample_rate_hertz=RATE,
-                language_code="ja-JP",
-                enable_automatic_punctuation=True,
-            ),
-            interim_results=True,
+            config=recognition_config,
+            interim_results=True,  # 途中結果を取得する
+            single_utterance=False # 複数回の発話を認識
         )
         yield speech.StreamingRecognizeRequest(streaming_config=streaming_config)
         logger.info("🎤 ストリーミング設定送信完了！音声待機中...")
 
+        # 2. キューから音声データを読み取って送信
         while self._is_running and not self._stop_event.is_set():
             try:
+                # タイムアウト付きでキューからデータを取得
                 chunk = await asyncio.wait_for(self._audio_queue.get(), timeout=0.1)
-                if chunk is None: 
-                    logger.info("キューからNoneを受け取ったのでジェネレータを終了します。")
-                    break
-                
-                # --- PitchWorkerの処理をここに移動しない ---
-                # このジェネレータはSpeech-to-Text APIにデータを送ることに専念する
-                # ピッチ解析は process_audio_chunk で行われる
-                
                 yield speech.StreamingRecognizeRequest(audio_content=chunk)
             except asyncio.TimeoutError:
-                # タイムアウトは想定内の動作なので、ログレベルをDEBUGに
-                # logger.debug("キューからの待機がタイムアウトしました。次のループへ。")
+                # タイムアウトはエラーじゃない。データが来てないだけだからループを続ける
                 continue
             except asyncio.CancelledError:
-                logger.info("ジェネレータがキャンセルされました。")
+                logger.info("🎤 _microphone_stream_generatorがキャンセルされました。")
                 break
-            except Exception as e:
-                logger.error(f"😱 _microphone_stream_generatorで予期せぬエラー: {e}", exc_info=True)
-                break
-        logger.info("🎤 _microphone_stream_generator 終了")
+        
+        logger.info("🎤 音声ストリームジェネレータが終了します。")
 
     def _microphone_worker(self):
         """
-        PyAudioでマイクから音声を取得し、キューに入れるワーカー関数 (スレッドで実行)。
+        PyAudioを使ってマイクから音声を取得し、非同期キューに入れるワーカー関数。
         これは手動テスト (`manual_test_speech_processor.py`) のためのものだよん！
         """
         p = self._get_pyaudio_instance()
@@ -402,135 +399,130 @@ class SpeechProcessor:
 
     async def stop_transcription_and_evaluation(self):
         """
-        文字起こしと評価のセッションを停止し、最終評価を取得するよん！
+        文字起こしと評価の全プロセスを停止し、最終評価を実行するよ！
         """
-        logger.info("⏳ 文字起こしと評価の処理を停止中...")
-
         if not self._is_running:
-            logger.warning("ストリームはすでに停止しています。")
+            logger.warning("セッションはすでに停止しています。")
             return
+        
+        logger.info("セッション停止プロセスを開始します...")
 
+        # 1. まずは新しい音声データを受け付けないようにフラグを立てる
         self._is_running = False
         self._stop_event.set()
 
-        # マイクストリーミングを停止
-        # マイク用のキューにNoneを入れてジェネレータを止める
-        if self._audio_queue:
-            await self._audio_queue.put(None)
-
-        # メイン処理タスクの完了を待つ
-        if self._processing_task:
-            try:
-                await asyncio.wait_for(self._processing_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("⌛ _processing_task の停止がタイムアウトしました。")
-                self._processing_task.cancel()
-            except Exception as e:
-                logger.error(f"😱 _processing_task 停止中にエラー: {e}", exc_info=True)
-        
-        # マイクスレッドの停止（手動テスト用）
-        if self._microphone_task and self._microphone_task.is_alive():
-            # この部分は手動テスト用なので、WebSocket経由では直接呼ばれない
-            logger.info("🎤 マイクスレッドの終了を待機中...")
-            # _microphone_worker内のループは_is_runningフラグで終了するはず
-            self._microphone_task.join(timeout=3.0)
-            if self._microphone_task.is_alive():
-                logger.warning("🎤 マイクスレッドの終了がタイムアウトしました。")
-
-
-        # ワーカーを停止
-        await self._stop_workers()
-        logger.info("✅ ワーカーを停止しました。")
-        
-        # --- 最終評価の実行 ---
-        if self.gemini_enabled:
-            logger.info("⏳最終評価をGeminiにリクエスト中...")
-            
-            # ピッチデータのサマリーを作成
-            self._summarize_pitch_data()
-
-            # フロントエンドに評価中であることを通知
-            await self._send_to_client("evaluation_started", {})
-            
-            try:
-                final_evaluation = await gemini_service.get_gemini_evaluation(
-                    interview_question=self.current_interview_question,
-                    transcript=self.full_transcript.strip(),
-                    pitch_analysis=self.last_pitch_analysis_summary,
-                    emotion_analysis=self.last_emotion_analysis_summary,
-                )
-                logger.info(f"👑 Geminiからの最終評価:\n{final_evaluation}")
-
-                # フロントエンドに最終評価を送信
-                await self._send_to_client(
-                    "final_evaluation",
-                    {"evaluation": final_evaluation}
-                )
-
-            except Exception as e:
-                logger.error(f"😱 Geminiへの評価リクエスト中にエラーが発生: {e}", exc_info=True)
-                await self._send_to_client(
-                    "error",
-                    {"message": f"Gemini評価中にエラーが発生しました: {e}"}
-                )
-        else:
-            logger.warning("😢 Gemini評価は無効なため、最終評価はスキップされました。")
-
-        logger.info("✅ すべてのセッション処理が完了しました。")
-
-        # リソースのクリーンアップ
-        self._stop_event.clear()
-        self._processing_task = None
-        self._microphone_task = None
-        # キューをクリアする
+        # 2. 音声キューをクリアし、ジェネレータに終了を通知するためのダミーデータを送信
         while not self._audio_queue.empty():
             self._audio_queue.get_nowait()
-            
-    def _summarize_pitch_data(self):
-        """セッション中に収集したピッチデータを要約して、last_pitch_analysis_summaryを更新する"""
-        if not self.pitch_values:
-            logger.info("ピッチデータが収集されなかったので、ピッチの要約はスキップします。")
-            self.last_pitch_analysis_summary = {
-                "average_pitch": "データなし",
-                "pitch_variation": "データなし",
-                "pitch_stability": "データなし",
-                "min_pitch": "データなし",
-                "max_pitch": "データなし",
-            }
-            return
+        await self._audio_queue.put(b"") #ジェネレータを確実に終了させる
+
+        # 3. メインの処理タスクをキャンセル
+        if self._processing_task and not self._processing_task.done():
+            logger.info("メイン処理タスクをキャンセルします...")
+            self._processing_task.cancel()
+            try:
+                await self._processing_task
+            except asyncio.CancelledError:
+                logger.info("メイン処理タスクが正常にキャンセルされました。")
+
+        # 4. ワーカーを停止（これは_process_speech_streamのfinallyでも呼ばれるけど念のため）
+        await self._stop_workers()
+
+        # 5. 手動テスト用のマイクスレッドが動いていたら停止
+        if self._microphone_task and self._microphone_task.is_alive():
+            logger.info("手動テスト用のマイクスレッドを停止します。")
+            self._microphone_task.join()
+            self._microphone_task = None
+
+        logger.info("⏳ 全てのリアルタイム処理を停止しました。最終評価を開始します...")
+        await self._send_to_client("evaluation_started", {})
 
         try:
-            import numpy as np
+            # 6. 最終評価の実行
+            final_evaluation = await self._run_final_evaluation()
             
-            # NumPy配列に変換
-            pitch_array = np.array(self.pitch_values)
+            # 7. 最終評価をクライアントに送信
+            logger.info("👑 最終評価が完了しました！")
+            # logger.debug(f"最終評価ペイロード: {final_evaluation}")
+            await self._send_to_client("final_evaluation", {"evaluation": final_evaluation})
             
-            # 平均ピッチ
-            avg_pitch = np.mean(pitch_array)
-            # ピッチの標準偏差（変動）
-            std_dev_pitch = np.std(pitch_array)
-            # ピッチの安定性（変動係数） - 平均に対する変動の割合
-            # avg_pitchが0の場合のゼロ除算を避ける
-            cv_pitch = (std_dev_pitch / avg_pitch) * 100 if avg_pitch > 0 else 0
-            # 最小・最大ピッチ
-            min_pitch = np.min(pitch_array)
-            max_pitch = np.max(pitch_array)
+            # Geminiからの構造化されたフィードバックも送信
+            if self.gemini_enabled and isinstance(final_evaluation, dict):
+                 # `final_evaluation` が辞書であり、期待するキーを持つか確認
+                if "raw_evaluation" in final_evaluation and "score" in final_evaluation:
+                    await self._send_to_client("gemini_feedback", final_evaluation)
+                else:
+                    # 互換性のためのフォールバック
+                    await self._send_to_client("gemini_feedback", {
+                        "raw_evaluation": str(final_evaluation),
+                        "score": 50 # デフォルトスコア
+                    })
 
-            self.last_pitch_analysis_summary = {
-                "average_pitch": f"{avg_pitch:.2f} Hz",
-                "pitch_variation": f"{std_dev_pitch:.2f} Hz (標準偏差)",
-                "pitch_stability": f"{cv_pitch:.2f} % (変動係数)",
-                "min_pitch": f"{min_pitch:.2f} Hz",
-                "max_pitch": f"{max_pitch:.2f} Hz",
-            }
-            logger.info(f"🎤 ピッチデータの要約完了: {self.last_pitch_analysis_summary}")
-
-        except ImportError:
-            logger.warning("NumPyがインストールされていないため、ピッチの統計情報を計算できません。")
-            self.last_pitch_analysis_summary = {"error": "NumPy not found"}
         except Exception as e:
-            logger.error(f"ピッチデータの要約中にエラーが発生しました: {e}", exc_info=True)
-            self.last_pitch_analysis_summary = {"error": str(e)}
+            logger.error(f"😱 最終評価の生成中にエラーが発生しました: {e}", exc_info=True)
+            await self._send_to_client("error", {"message": "最終評価の生成中にエラーが発生しました。"})
+        
+        logger.info("✅ セッションが正常に終了しました。")
+
+
+    async def _run_final_evaluation(self) -> dict | str:
+        """
+        セッション終了後に、収集したデータを使ってGeminiに最終評価をリクエストするよ！
+        """
+        logger.info("🧠 Geminiによる最終評価を準備中...")
+        
+        # 収集したデータをサマリー
+        self.last_pitch_analysis_summary = self._summarize_pitch_data()
+
+        # Geminiに渡すためのコンテキストを作成
+        evaluation_context = {
+            "question": self.current_interview_question,
+            "full_transcript": self.full_transcript,
+            "pitch_analysis": self.last_pitch_analysis_summary,
+            "emotion_analysis": self.last_emotion_analysis_summary
+        }
+        
+        if self.gemini_enabled:
+            try:
+                # gemini_service モジュールの関数を呼び出す
+                response_data = await gemini_service.generate_structured_feedback(evaluation_context)
+                logger.info("💎 Geminiから評価を取得しました！")
+                # response_data は既に辞書のはず
+                return response_data
+            except Exception as e:
+                logger.error(f"😱 Geminiへのリクエスト中にエラー: {e}", exc_info=True)
+                return f"Gemini評価中にエラーが発生しました: {e}"
+        else:
+            logger.warning("😢 Geminiが無効なため、最終評価をスキップします。")
+            return "Gemini評価は現在無効です。"
+
+
+    def _summarize_pitch_data(self):
+        """ピッチデータのリストから統計情報を計算するよ"""
+        if not self.pitch_values:
+            logger.info("ピッチデータが収集されなかったので、ピッチの要約はスキップします。")
+            return {}
+
+        # npをインポート
+        try:
+            import numpy as np
+        except ImportError:
+            logger.warning("numpyがインストールされていないため、ピッチの統計情報を計算できません。")
+            return {}
+
+        try:
+            pitches = np.array(self.pitch_values)
+            average_pitch = np.mean(pitches)
+            pitch_variation = np.std(pitches)
+            
+            summary = {
+                "average_pitch": f"{average_pitch:.2f}",
+                "pitch_variation": f"{pitch_variation:.2f}",
+            }
+            return summary
+        except Exception as e:
+            logger.error(f"ピッチデータの要約中にエラー: {e}", exc_info=True)
+            return {}
 
 
     def __del__(self):

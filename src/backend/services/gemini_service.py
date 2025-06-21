@@ -194,13 +194,25 @@ def load_gemini_config_and_init():
 load_gemini_config_and_init()
 
 
-async def get_gemini_evaluation(interview_question: str, transcript: str, pitch_analysis: dict, emotion_analysis: dict) -> str | None:
+async def generate_structured_feedback(evaluation_context: dict) -> dict:
     """
-    Gemini評価APIを非同期で呼び出し、評価結果のテキストを返す。
+    Gemini評価APIを非同期で呼び出し、構造化された評価結果(dict)を返す。
     """
     if not gemini_model_instance:
         logger.error("Geminiモデルが初期化されていないため、評価を実行できません。")
-        return None
+        return {
+            "error": "Gemini model not initialized.",
+            "raw_evaluation": "評価モデルが初期化されていません。",
+            "score": 0
+        }
+
+    # --- evaluation_contextから必要な情報を取り出す ---
+    # speech_processor._run_final_evaluation() で作成された辞書を想定
+    transcript = evaluation_context.get('full_transcript', '')
+    pitch_analysis = evaluation_context.get('pitch_analysis', {})
+    emotion_analysis = evaluation_context.get('emotion_analysis', {})
+    interview_question = evaluation_context.get('question', '指定なし')
+
 
     # プロンプトに情報を埋め込む
     prompt = PROMPT_TEMPLATE.format(
@@ -209,11 +221,10 @@ async def get_gemini_evaluation(interview_question: str, transcript: str, pitch_
         # speech_processor._summarize_pitch_data() のキー名と完全に一致させる！
         average_pitch=pitch_analysis.get("average_pitch", "N/A"),
         pitch_variation=pitch_analysis.get("pitch_variation", "N/A"),
-        pitch_stability=pitch_analysis.get("pitch_stability", "N/A"),
-        # ↓以下の項目は現状の実装では計算していないため、"N/A"とするか、プロンプトテンプレートから削除する
-        speaking_rate="N/A", # speaking_rate は未計算
-        pause_frequency="N/A", # pause_frequency は未計算
-        average_pause_duration="N/A", # average_pause_duration は未計算
+        # ↓以下の項目は現状の実装では計算していないため、"N/A"とする
+        speaking_rate="N/A",
+        pause_frequency="N/A",
+        average_pause_duration="N/A",
         # speech_processor._handle_emotion_data() のキー名と完全に一致させる！
         dominant_emotion=emotion_analysis.get("dominant_emotion", "N/A"),
         emotion_score=emotion_analysis.get("emotion_score", "N/A"),
@@ -221,6 +232,7 @@ async def get_gemini_evaluation(interview_question: str, transcript: str, pitch_
         emotion_transition=emotion_analysis.get("emotion_transition", "N/A")
     )
     
+    # --- モデルの設定を読み込む ---
     generation_config = gemini_config.get("generation_config", {
         "temperature": 0.7,
         "top_p": 1.0,
@@ -243,19 +255,48 @@ async def get_gemini_evaluation(interview_question: str, transcript: str, pitch_
             stream=False
         )
         
-        evaluation_text = response.text
+        raw_evaluation_text = response.text
         logger.info("Geminiから面接評価を受信しました。")
-        return evaluation_text
+
+        # レスポンスをパースして構造化データに変換
+        parsed_data = parse_gemini_response_data(raw_evaluation_text)
+        return parsed_data
     
     except Exception as e:
-        logger.error(f"Gemini APIの呼び出し中にエラーが発生しました: {e}", exc_info=True)
-        return None
-
+        logger.error(f"Gemini APIとの通信中にエラーが発生しました: {e}", exc_info=True)
+        return {
+            "error": str(e),
+            "raw_evaluation": f"Gemini評価中にエラーが発生しました: {e}",
+            "score": 0
+        }
 
 def parse_gemini_response_data(response_text: str) -> dict:
     """
-    Geminiからのレスポンス(テキスト)をパースして辞書形式に変換する。
-    現状は単純にテキストをそのまま返す。将来的にはMarkdownをパースするなど。
+    Geminiからの生のテキストレスポンスをパースして、
+    フロントエンドで使いやすい辞書形式に変換する。
     """
-    logger.info("Geminiレスポンスのパース処理 (現在は生テキストを返します)")
-    return {"raw_evaluation": response_text} 
+    # ここでは単純な実装例として、テキスト全体と仮のスコアを返す。
+    # TODO: 正規表現やキーワード検索を使って、レスポンスから各項目を抽出する
+    # 例: 総合評価、STAR評価の各項目、改善点、アピールポイントなど
+    
+    score = 50  # 仮のスコア
+    try:
+        # "総合評価 (5段階)" の部分を探してスコアを抽出する
+        # 例: "総合評価 (5段階)\n3. 良い" -> 3
+        # 簡単な正規表現で実装してみる
+        import re
+        match = re.search(r"総合評価\s*\(5段階\)\s*[:\n\s]*(\d+)", response_text)
+        if match:
+            # 評価(1-5)を100点満点に変換 (1->20, 2->40, 3->60, 4->80, 5->100)
+            score = int(match.group(1)) * 20
+    except Exception:
+        # パースに失敗してもエラーにしない
+        pass
+
+    return {
+        "raw_evaluation": response_text,
+        "score": score,
+        # "star_situation": "...", # 将来的にパースして追加
+        # "star_task": "...",
+        # ...
+    } 

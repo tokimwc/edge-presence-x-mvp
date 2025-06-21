@@ -1,0 +1,24 @@
+language: "ja"
+reviews:
+  high_level_summary: true
+  poem: false
+  path_instructions:
+    - path: "src/backend/**/*.py"
+      instructions: |
+        Python コードをレビューする際は以下を重視してください：
+        - Google Cloud APIの適切な使用
+        - 音声処理の効率性
+        - エラーハンドリングの完全性
+    - path: "**/*.vue"
+      instructions: |
+        Vue.js コンポーネントで以下を確認してください：
+        - リアルタイム音声処理の実装
+        - ユーザビリティの観点
+    - path: "requirements.txt"
+      instructions: "依存関係のセキュリティ脆弱性をチェックしてください"
+auto_review:
+  enabled: true
+  ignore_title_keywords:
+    - "WIP"
+    - "作業中"
+  drafts: false

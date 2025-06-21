@@ -33,10 +33,13 @@ export interface SentimentData {
 // グローバルスコープで宣言して、複数の関数からアクセスできるようにする
 let audioContext: AudioContext | null = null;
 let stream: MediaStream | null = null;
-let processor: ScriptProcessorNode | null = null;
+let workletNode: AudioWorkletNode | null = null;
 const SAMPLE_RATE = 16000; // バックエンドの期待値に合わせる
 const audioStream = ref<MediaStream | null>(null);
 const localStream = ref<MediaStream | null>(null);
+
+/** 面接の状態を表す型 */
+export type InterviewState = 'idle' | 'starting' | 'in_progress' | 'evaluating' | 'finished' | 'error';
 
 export const useInterviewStore = defineStore('interview', () => {
   /**
@@ -44,6 +47,12 @@ export const useInterviewStore = defineStore('interview', () => {
    * @type {import('vue').Ref<WebSocketConnectionState>}
    */
   const connectionState = ref<WebSocketConnectionState>('idle');
+
+  /**
+   * 面接の状態
+   * @type {import('vue').Ref<InterviewState>}
+   */
+  const interviewState = ref<InterviewState>('idle');
 
   /**
    * リアルタイム文字起こしデータ
@@ -72,6 +81,7 @@ export const useInterviewStore = defineStore('interview', () => {
   /**
    * 面接がアクティブかどうか
    * @type {import('vue').Ref<boolean>}
+   * @deprecated interviewStateを使用してください
    */
   const isInterviewActive = ref(false);
 
@@ -128,24 +138,38 @@ export const useInterviewStore = defineStore('interview', () => {
         break;
       case 'evaluation_started':
         isEvaluating.value = true;
+        interviewState.value = 'evaluating';
         console.log('⌛ AIによる評価が開始されました...');
         break;
       case 'final_evaluation':
+        // このイベントはgemini_feedbackに統合されつつあるが、後方互換性のために残す
+        // feedbackがオブジェクトの場合があるので、raw_evaluationを優先的に使う
         isEvaluating.value = false;
+        interviewState.value = 'finished';
+        const rawEval = message.payload.evaluation?.raw_evaluation || JSON.stringify(message.payload.evaluation);
         evaluations.value.push({
             type: '総合評価 (Gemini)',
-            score: 0, // TODO: 本来はレスポンスからパースすべき
-            feedback: message.payload.evaluation,
+            score: message.payload.evaluation?.score || 0,
+            feedback: rawEval,
         });
-        console.log('👑 AIによる最終評価を受信しました！');
+        console.log('👑 AIによる最終評価を受信しました！(final_evaluation)');
         break;
       case 'gemini_feedback':
         isEvaluating.value = false;
-        evaluations.value.push({
-            type: '総合評価 (Gemini)',
-            score: message.payload.score || 0, // 仮
-            feedback: message.payload.raw_evaluation,
-        });
+        interviewState.value = 'finished';
+        // 既存の評価があれば更新、なければ追加
+        const existingEvalIndex = evaluations.value.findIndex(e => e.type === '総合評価 (Gemini)');
+        const newEval = {
+          type: '総合評価 (Gemini)',
+          score: message.payload.score || 0,
+          feedback: message.payload.raw_evaluation,
+        };
+        if (existingEvalIndex > -1) {
+          evaluations.value[existingEvalIndex] = newEval;
+        } else {
+          evaluations.value.push(newEval);
+        }
+        console.log('👑 AIによる構造化フィードバックを受信しました！(gemini_feedback)');
         break;
       case 'pitch_analysis':
         const newPitchData: PitchData = {
@@ -171,6 +195,7 @@ export const useInterviewStore = defineStore('interview', () => {
         break;
       case 'error':
         errorMessage.value = `サーバーエラー: ${message.payload.message}`;
+        interviewState.value = 'error';
         break;
       default:
         console.warn('🤔 不明なメッセージタイプ:', message.type);
@@ -215,7 +240,10 @@ export const useInterviewStore = defineStore('interview', () => {
 
     socket.onclose = () => {
       connectionState.value = 'disconnected';
-      isInterviewActive.value = false;
+      isInterviewActive.value = false; // 古い値も更新しておく
+      if (interviewState.value !== 'finished') {
+        interviewState.value = 'idle';
+      }
       console.log('WebSocket connection closed.');
     };
   }
@@ -225,12 +253,13 @@ export const useInterviewStore = defineStore('interview', () => {
    */
   function disconnect() {
     if (socket && socket.readyState === WebSocket.OPEN) {
-        if (isInterviewActive.value) {
-            stopInterview();
-        }
-        socket.close();
-        socket = null;
+      if (isInterviewActive.value || interviewState.value === 'in_progress') {
+        stopInterview();
+      }
+      socket.close();
+      socket = null;
     }
+    stopAudioStreaming();
     console.log('🔌 WebSocket disconnected.');
   }
 
@@ -239,48 +268,45 @@ export const useInterviewStore = defineStore('interview', () => {
    */
   async function startAudioStreaming() {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-       errorMessage.value = "WebSocket接続がありません。";
-       return;
+      errorMessage.value = 'WebSocket接続がありません。';
+      return;
     }
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-      audioStream.value = stream;
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       localStream.value = stream;
-      audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
-      const source = audioContext.createMediaStreamSource(stream);
-      processor = audioContext.createScriptProcessor(4096, 1, 1);
+      interviewState.value = 'in_progress'; // 音声取得成功でin_progressへ
 
-      processor.onaudioprocess = (e) => {
-        if (socket && socket.readyState === WebSocket.OPEN && isInterviewActive.value) {
-          const inputData = e.inputBuffer.getChannelData(0);
-          // 16-bit PCMに変換
-          const pcmData = new Int16Array(inputData.length);
-          for (let i = 0; i < inputData.length; i++) {
-            let s = Math.max(-1, Math.min(1, inputData[i]));
+      audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+
+      // Load the audio worklet processor from the public folder
+      await audioContext.audioWorklet.addModule('/audio-processor.js');
+
+      const source = audioContext.createMediaStreamSource(stream);
+      workletNode = new AudioWorkletNode(audioContext, 'audio-processor');
+
+      workletNode.port.onmessage = (event) => {
+        if (socket?.readyState === WebSocket.OPEN && isInterviewActive.value) {
+          // event.data is the ArrayBuffer from the worklet
+          const float32Data = new Float32Array(event.data);
+          
+          // Convert to 16-bit PCM
+          const pcmData = new Int16Array(float32Data.length);
+          for (let i = 0; i < float32Data.length; i++) {
+            let s = Math.max(-1, Math.min(1, float32Data[i]));
             pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
           }
-          console.log(`🎤 音声データ送信中... (${pcmData.byteLength} bytes)`);
           socket.send(pcmData.buffer);
         }
       };
 
-      const analyser = audioContext.createAnalyser();
-      source.connect(analyser);
+      source.connect(workletNode);
+      workletNode.connect(audioContext.destination);
 
-      source.connect(processor);
-      // ScriptProcessorNodeをdestinationに接続しないとonaudioprocessが発火しない
-      // ユーザーに自分の声が聞こえないようにGainNodeを挟んで無音化する
-      const gainNode = audioContext.createGain();
-      gainNode.gain.value = 0;
-      processor.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-
-      console.log("🎤 マイクの準備OK！音声ストリーミング開始！");
-
-    } catch (e) {
-      console.error('マイクの取得に失敗しました。', e);
-      errorMessage.value = "マイクの使用が許可されていません。ブラウザの設定を確認してください。";
-      isInterviewActive.value = false;
+      console.log('🎤 マイクの準備OK！音声ストリーミング開始！(AudioWorklet)');
+    } catch (err) {
+      console.error('マイクの取得に失敗しました:', err);
+      errorMessage.value = 'マイクへのアクセスが拒否されたか、マイクが見つかりませんでした。';
+      interviewState.value = 'error';
     }
   }
 
@@ -288,74 +314,95 @@ export const useInterviewStore = defineStore('interview', () => {
    * 音声ストリーミングを停止します。
    */
   function stopAudioStreaming() {
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop());
-    }
-    if (audioContext) {
-      audioContext.close();
-    }
-    if (processor) {
-      processor.disconnect();
-    }
+    stream?.getTracks().forEach((track) => track.stop());
     stream = null;
-    audioStream.value = null;
+    
+    localStream.value?.getTracks().forEach((track) => track.stop());
     localStream.value = null;
+
+    workletNode?.port.close();
+    workletNode?.disconnect();
+    workletNode = null;
+    
+    audioContext?.close().catch(console.error);
     audioContext = null;
-    processor = null;
-    console.log("🛑 音声ストリーミングを停止しました。");
+
+    console.log('🛑 音声ストリーミングを停止しました。');
   }
 
   /**
    * 面接セッションを開始します。
    */
   async function startInterview() {
-    if (connectionState.value !== 'connected' || !socket) {
-      errorMessage.value = 'サーバーに接続されていません。';
+    if (interviewState.value === 'in_progress' || interviewState.value === 'starting') {
+      console.warn('Interview is already in progress.');
       return;
     }
-    // 既存のデータをリセット
-    transcriptions.value = [];
-    evaluations.value = [];
-    errorMessage.value = null;
 
+    console.log('🚀 面接セッションを開始します...');
     isInterviewActive.value = true;
+    interviewState.value = 'starting';
+    isEvaluating.value = false;
+    errorMessage.value = null;
     transcriptions.value = [{ text: '...', is_final: false, timestamp: Date.now() }];
     evaluations.value = [];
-    errorMessage.value = null;
-    isEvaluating.value = false; // 念のためリセット
+    pitchHistory.value = [];
+    sentimentHistory.value = [];
 
-    await startAudioStreaming();
+    connect();
+
+    // DOM更新を待ってからストリーミングを開始
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     if (socket && socket.readyState === WebSocket.OPEN) {
-      // バックエンドに面接開始のメッセージを送信
-      socket.send(JSON.stringify({ action: 'start' })); // バックエンドの期待値 'start' に修正
-      console.log('▶️ 面接開始の合図を送信しました。');
+      socket.send(JSON.stringify({
+        action: 'start',
+        question: '自己紹介をお願いします。', // 将来的には動的に変更
+      }));
+      await startAudioStreaming();
+    } else {
+        // もし接続がまだなら、onopenハンドラでstartAudioStreamingを呼ぶ必要がある
+        // 今回はconnect()が同期的ではないため、接続完了を待つ必要がある
+        // より堅牢な実装は、接続状態を監視して、'connected'になったら後続処理を行うこと
+        console.log("WebSocket is not open. Waiting for connection...");
+        // ここではエラーとして扱うか、リトライロジックを入れる
+        // シンプルにするため、一度`connect`を呼んで少し待つ実装にしている
     }
   }
 
   /**
-   * 面接を終了し、最終評価をリクエストします。
+   * 面接セッションを停止します。
    */
   function stopInterview() {
-    if (isInterviewActive.value) {
-      console.log('🗣️ 面接セッションを終了します。');
-      isInterviewActive.value = false;
-      // Clear history for the next session
-      transcriptions.value = [];
-      evaluations.value = [];
-      pitchHistory.value = [];
-      sentimentHistory.value = [];
+    if (interviewState.value !== 'in_progress') return;
 
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'end_session' }));
-      } else {
-        errorMessage.value = "サーバーに接続されていないため、面接を正常に終了できません。";
-        isEvaluating.value = false; // エラー時は評価中にしない
-      }
+    console.log('🛑 面接セッションを終了します...');
+    interviewState.value = 'evaluating'; // 評価中に状態を変更
+    isInterviewActive.value = false; // 古いフラグも更新
 
-      // notify avatar modules to cleanup
-      window.dispatchEvent(new Event('avatar/reset'))
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'end_session' }));
+      console.log('📤 セッション終了メッセージを送信しました。');
     }
+    
+    isEvaluating.value = true;
+    stopAudioStreaming();
+  }
+
+  /**
+   * ストアの状態をリセットします。
+   */
+  function resetStore() {
+    console.log('🔄 ストアの状態をリセットします。');
+    disconnect();
+    isInterviewActive.value = false;
+    isEvaluating.value = false;
+    errorMessage.value = null;
+    transcriptions.value = [];
+    evaluations.value = [];
+    pitchHistory.value = [];
+    sentimentHistory.value = [];
+    interviewState.value = 'idle';
   }
 
   return {
@@ -364,14 +411,17 @@ export const useInterviewStore = defineStore('interview', () => {
     evaluations,
     pitchHistory,
     sentimentHistory,
-    isInterviewActive,
+    isInterviewActive, // 後方互換性のために残すが、徐々に使わないようにする
     isEvaluating,
     errorMessage,
+    audioStream, // for visualizer
+    localStream,
+    interviewState,
+
     connect,
     disconnect,
     startInterview,
     stopInterview,
-    audioStream,
-    localStream,
+    resetStore, // 外部からリセットできるように
   };
 });

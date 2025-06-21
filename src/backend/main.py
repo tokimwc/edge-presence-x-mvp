@@ -59,12 +59,17 @@ async def websocket_handler(websocket: WebSocket):
             if 'text' in message:
                 data = json.loads(message['text'])
                 logger.info(f"クライアントからJSONメッセージ受信: {data}")
+                
+                # フロントエンドからのメッセージ形式を柔軟に処理する
                 action = data.get("action")
+                msg_type = data.get("type")
+
                 if action == "start":
                     question = data.get("question", "自己紹介をお願いします。")
                     speech_processor.set_interview_question(question)
                     asyncio.create_task(speech_processor.start_transcription_and_evaluation())
-                elif action == "stop":
+                elif action == "stop" or msg_type == "end_session":
+                    logger.info("クライアントからセッション終了リクエストを受信しました。")
                     asyncio.create_task(speech_processor.stop_transcription_and_evaluation())
             elif 'bytes' in message:
                 audio_chunk = message['bytes']
@@ -76,6 +81,7 @@ async def websocket_handler(websocket: WebSocket):
     finally:
         logger.info("🔌 WebSocket接続ハンドラをクリーンアップします。")
         if speech_processor and speech_processor._is_running:
+            logger.info("セッションがまだアクティブな可能性があるため、強制停止を試みます。")
             await speech_processor.stop_transcription_and_evaluation()
 
 # --- 静的ファイルの配信設定 ---
