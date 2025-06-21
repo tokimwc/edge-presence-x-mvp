@@ -15,6 +15,7 @@ from typing import Callable, Dict, Any, Optional
 from google.cloud import language_v1
 from google.cloud.language_v1.types import Document # type_ の代わりに Document.Type を使えるように
 import sys # 環境変数のために追加
+import time # タイムスタンプのために追加
 
 # --- Pythonのモジュール検索パスにsrcディレクトリを追加 ---
 # この部分は speech_processor.py と同じ構造なので、必要に応じて調整してね！
@@ -59,13 +60,14 @@ class SentimentWorker:
 
         logger.info("😊 SentimentWorker (Google Cloud NL API版) 初期化完了！✨")
 
-    async def add_text(self, text: str):
+    async def add_text(self, text: str, timestamp: Optional[float] = None):
         """
         外部（SpeechProcessor）から感情分析したいテキストを受け取って、
         キューに追加するメソッドだよん！
+        タイムスタンプも一緒に受け取る！
         """
         if self._is_running:
-            await self._text_queue.put(text)
+            await self._text_queue.put({"text": text, "timestamp": timestamp or time.time()})
         else:
             logger.warning("SentimentWorkerが停止中にテキストが追加されようとしました。スキップします。")
 
@@ -75,12 +77,15 @@ class SentimentWorker:
         """
         while self._is_running or not self._text_queue.empty():
             try:
-                text = await asyncio.wait_for(self._text_queue.get(), timeout=1.0)
-                if text is None:  # 終了の合図
+                item = await asyncio.wait_for(self._text_queue.get(), timeout=1.0)
+                if item is None:  # 終了の合図
                     break
 
-                if not self.language_client:
-                    logger.error("Natural Language APIクライアントがないから分析できないっ🥺")
+                text = item.get("text")
+                timestamp = item.get("timestamp")
+
+                if not self.language_client or not text:
+                    logger.error("Natural Language APIクライアントがないかテキストが空なので分析できないっ🥺")
                     continue
                 
                 logger.debug(f"📝 感情分析のためにテキスト受信: '{text[:100]}...'")
@@ -95,7 +100,8 @@ class SentimentWorker:
                     magnitude = response_sentiment.magnitude
                     emotion_data = {
                         "emotions": {"score": score, "magnitude": magnitude},
-                        "text_processed": text
+                        "text_processed": text,
+                        "timestamp": timestamp, # SpeechProcessorから受け取ったタイムスタンプをそのまま使う
                     }
                     if self.on_emotion_callback:
                         # create_taskはコールバックが非同期(async def)の場合に使う。

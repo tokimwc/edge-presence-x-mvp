@@ -184,7 +184,7 @@ export const useInterviewStore = defineStore('interview', () => {
         break;
       case 'sentiment_analysis':
         const newSentimentData: SentimentData = {
-          timestamp: Date.now(),
+          timestamp: (message.payload.timestamp || Date.now() / 1000) * 1000, // バックエンドのPythonタイムスタンプ(s)をJS(ms)に変換
           score: message.payload.emotions?.score || 0,
           magnitude: message.payload.emotions?.magnitude || 0,
         };

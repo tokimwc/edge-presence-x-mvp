@@ -166,26 +166,30 @@ class SpeechProcessor:
     def _handle_emotion_data(self, emotion_data: dict):
         """
         SentimentWorkerからの感情分析結果を処理するコールバック関数。
-        Google Cloud Natural Language API の結果に合わせて調整したよん！
+        別スレッドから呼ばれるから、メインのイベントループに処理を投げるよん！
         """
-        # Natural Language API からは score と magnitude がメインで返ってくる
         score = emotion_data.get("emotions", {}).get("score")
         magnitude = emotion_data.get("emotions", {}).get("magnitude")
-        text_processed = emotion_data.get("text_processed", "")
 
-        if score is not None and magnitude is not None:
-            logger.info(f"😊 感情分析結果 (Google NL): スコア={score:.2f}, 強さ={magnitude:.2f} (テキスト: '{text_processed[:50]}...')")
-            # TODO: この情報を self.last_emotion_analysis_summary に適切に格納する
-            # 例: self.last_emotion_analysis_summary = {"dominant_emotion": "解析ロジック", "score": score, "magnitude": magnitude, ...}
-            # 今回は単純に最新のものを保持する例
-            self.last_emotion_analysis_summary = {
-                "dominant_emotion": "不明 (Google NL score/magnitudeベース)",
-                "emotion_score": score,
-                "emotion_intensity": magnitude,
-                "emotion_transition": "N/A (Google NLは発話全体)" # Google NLの基本APIでは推移は取れない
-            }
-        else:
+        if score is None or magnitude is None:
             logger.warning(f"🤔 感情分析結果が不完全です: {emotion_data}")
+            return
+
+        text_processed = emotion_data.get("text_processed", "")
+        logger.info(f"😊 感情分析結果 (Google NL): スコア={score:.2f}, 強さ={magnitude:.2f} (テキスト: '{text_processed[:50]}...')")
+
+        # 最終評価用に最新のデータを保存しておく
+        self.last_emotion_analysis_summary = {
+            "dominant_emotion": "不明 (Google NL score/magnitudeベース)",
+            "emotion_score": score,
+            "emotion_intensity": magnitude,
+            "emotion_transition": "N/A (Google NLは発話全体)"
+        }
+
+        # メインスレッドのイベントループで、クライアントへの送信タスクをスケジュール
+        # run_coroutine_threadsafe はスレッドセーフなのがミソ！
+        coro = self._send_to_client("sentiment_analysis", emotion_data)
+        asyncio.run_coroutine_threadsafe(coro, self.main_loop)
 
     async def _process_speech_stream(self):
         """
@@ -219,7 +223,9 @@ class SpeechProcessor:
                 
                 # ワーカーにテキストデータを渡す
                 if self.sentiment_worker:
-                    await self.sentiment_worker.add_text(transcript)
+                    # is_finalな文字起こしが生成された時刻も一緒に渡す！
+                    timestamp = time.time()
+                    await self.sentiment_worker.add_text(transcript, timestamp)
 
                 if result.is_final:
                     logger.info(f"✅ 確定した文字起こし: {transcript}")
