@@ -1,0 +1,39 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ep-x-backend
+  annotations:
+    run.googleapis.com/description: "EP-X Realtime AI Interview Coach Backend"
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # スケールアウトは最大100インスタンスまで！高負荷にも耐えるっしょ！
+        autoscaling.knative.dev/maxScale: "100"
+        # CPUスロットリングは無効にして、常にフルパワーで動けるようにする！
+        run.googleapis.com/cpu-throttling: "false"
+    spec:
+      containerConcurrency: 80 # 1コンテナあたり80リクエストまで同時にさばく
+      timeoutSeconds: 300 # タイムアウトは5分に設定
+      containers:
+      - image: gcr.io/your-gcp-project-id/ep-x-backend # TODO: 'your-gcp-project-id'を実際のIDに書き換えてね！
+        ports:
+        - containerPort: 8080
+        env:
+        - name: GCP_PROJECT_ID
+          value: "your-gcp-project-id" # TODO: 'your-gcp-project-id'を実際のIDに書き換えてね！
+        - name: VERTEX_AI_PROJECT
+          value: "your-gcp-project-id" # TODO: 'your-gcp-project-id'を実際のIDに書き換えてね！
+        - name: SYMBL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: symbl-credentials # Secret Managerに 'symbl-credentials' って名前でシークレット作ってね！
+              key: latest # 最新バージョンのキーを使う
+        resources:
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+          requests:
+            cpu: "1"
+            memory: "2Gi"

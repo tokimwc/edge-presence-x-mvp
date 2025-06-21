@@ -7,6 +7,8 @@ import logging # logging モジュールをインポート
 import os # 環境変数のために追加
 import time
 import threading
+from google.cloud import pubsub_v1 # ◀️ Pub/Subライブラリをインポート！
+import json
 
 # --- Pythonのモジュール検索パスにsrcディレクトリを追加 ---
 import sys
@@ -35,6 +37,12 @@ logging.basicConfig(
 # このモジュール用のロガーを取得
 logger = logging.getLogger(__name__)
 
+# --- Pub/Sub関連の定数 ---
+# 環境変数から取得するのがイケてるけど、まずはハードコードで。後で直す！
+# TODO: GCPプロジェクトIDとトピック名を共通設定ファイルか環境変数から読み込むようにする
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "your-gcp-project-id")
+TRANSCRIPTION_TOPIC = "ep-x-transcriptions"
+
 # --- SpeechProcessorクラスでGemini関連のコードを管理するので、ここの重複は削除！ ---
 
 class SpeechProcessor:
@@ -55,6 +63,17 @@ class SpeechProcessor:
         self.microphone_stream = None
         self.send_to_client_callback = None # 送信コールバック関数
 
+        # --- Pub/Sub Publisherの初期化 ---
+        try:
+            self.publisher = pubsub_v1.PublisherClient()
+            self.topic_path = self.publisher.topic_path(GCP_PROJECT_ID, TRANSCRIPTION_TOPIC)
+            logger.info(f"✅ Pub/Sub Publisherの初期化完了！トピック: {self.topic_path}")
+        except Exception as e:
+            logger.exception("😱 Pub/Sub Publisher の初期化中にエラーが発生しました。")
+            self.publisher = None
+            self.topic_path = None
+        # --- ここまでPub/Sub初期化 ---
+
         # PitchWorker のインスタンスを作成
         try:
             self.pitch_worker = PitchWorker(
@@ -67,17 +86,22 @@ class SpeechProcessor:
             logger.exception("😱 PitchWorker の初期化中にエラーが発生しました。")
             self.pitch_worker = None
 
-        # SentimentWorker のインスタンスを作成
+        # --- Symbl.ai SentimentWorker の初期化 ---
+        # TODO: access_tokenとconnection_idを動的に取得する処理を追加する
+        self.symbl_access_token = os.getenv("SYMBL_API_KEY", "your_symbl_api_key")
+        self.symbl_connection_id = "some_unique_connection_id" # 本来はAPI経由で取得
+
         try:
-            # Google Cloud Natural Language API を使うので、APIキーは環境変数 GOOGLE_APPLICATION_CREDENTIALS で設定されてる前提だよん！
             self.sentiment_worker = SentimentWorker(
                 on_emotion_callback=self._handle_emotion_data,
-                language_code="ja" # Google Cloud NL API は "ja" を使うよ！
+                access_token=self.symbl_access_token,
+                connection_id=self.symbl_connection_id
             )
-            logger.info("😊 SentimentWorker (Google Cloud NL API版) の初期化に成功しました。")
-        except Exception as e: # SentimentWorker内でクライアント初期化エラーもキャッチできるように汎用的なExceptionに
-            logger.exception("😱 SentimentWorker (Google Cloud NL API版) の初期化中にエラーが発生しました。")
+            logger.info("😊 Symbl.ai SentimentWorker の初期化に成功しました。")
+        except Exception as e:
+            logger.exception("😱 Symbl.ai SentimentWorker の初期化中にエラーが発生しました。")
             self.sentiment_worker = None
+        # --- ここまでSentimentWorker初期化 ---
 
         logger.info("✨ SpeechProcessor 初期化完了！✨")
         logger.info(f"PyAudio設定: FORMAT={FORMAT}, CHANNELS={CHANNELS}, RATE={RATE}, CHUNK={CHUNK}, SAMPLE_WIDTH={SAMPLE_WIDTH}")
@@ -111,12 +135,12 @@ class SpeechProcessor:
     async def process_audio_chunk(self, chunk: bytes):
         """
         WebSocketから受け取った音声チャンクを処理するよ。
-        ピッチ解析と、文字起こしキューへの追加を行う。
+        ピッチ解析、感情分析、文字起こしキューへの追加を行う。
         """
         if not self._is_running:
             return
 
-        # 1. ピッチを解析 (バッファリング方式に変更)
+        # 1. ピッチを解析
         if self.pitch_worker and self._required_pitch_bytes > 0:
             self._pitch_buffer += chunk
 
@@ -139,7 +163,11 @@ class SpeechProcessor:
                 slide_bytes = self._required_pitch_bytes // 2
                 self._pitch_buffer = self._pitch_buffer[slide_bytes:]
 
-        # 2. 文字起こし用のキューに音声データを追加
+        # 2. Symbl.aiに音声データを送信
+        if self.sentiment_worker:
+            await self.sentiment_worker.send_audio(chunk)
+
+        # 3. 文字起こし用のキューに音声データを追加
         if not self._stop_event.is_set():
             await self._audio_queue.put(chunk)
 
@@ -192,30 +220,44 @@ class SpeechProcessor:
     def _handle_emotion_data(self, emotion_data: dict):
         """
         SentimentWorkerからの感情分析結果を処理するコールバック関数。
-        別スレッドから呼ばれるから、メインのイベントループに処理を投げるよん！
         """
-        score = emotion_data.get("emotions", {}).get("score")
-        magnitude = emotion_data.get("emotions", {}).get("magnitude")
-
-        if score is None or magnitude is None:
-            logger.warning(f"🤔 感情分析結果が不完全です: {emotion_data}")
-            return
-
-        text_processed = emotion_data.get("text_processed", "")
-        logger.info(f"😊 感情分析結果 (Google NL): スコア={score:.2f}, 強さ={magnitude:.2f} (テキスト: '{text_processed[:50]}...')")
+        # Symbl.aiからのデータ構造に合わせて調整
+        # 例: {'type': 'emotion', 'emotion': {'label': 'neutral', 'score': 0.9, ...}}
+        emotion_label = emotion_data.get("emotion", {}).get("label", "unknown")
+        score = emotion_data.get("emotion", {}).get("score", 0)
+        
+        logger.info(f"😊 感情分析結果 (Symbl.ai): 感情={emotion_label}, スコア={score:.2f}")
 
         # 最終評価用に最新のデータを保存しておく
         self.last_emotion_analysis_summary = {
-            "dominant_emotion": "不明 (Google NL score/magnitudeベース)",
+            "dominant_emotion": emotion_label,
             "emotion_score": score,
-            "emotion_intensity": magnitude,
-            "emotion_transition": "N/A (Google NLは発話全体)"
+            "emotion_intensity": "N/A", # Symbl.aiのEmotion APIには強度の概念はなさそう
+            "emotion_transition": "N/A" # リアルタイムなので推移は別途記録が必要
         }
 
         # メインスレッドのイベントループで、クライアントへの送信タスクをスケジュール
-        # run_coroutine_threadsafe はスレッドセーフなのがミソ！
         coro = self._send_to_client("sentiment_analysis", emotion_data)
         asyncio.run_coroutine_threadsafe(coro, self.main_loop)
+
+    async def _publish_to_pubsub(self, message_data: dict):
+        """
+        文字起こし結果などのデータをPub/Subに非同期で送信するよん！
+        """
+        if not self.publisher or not self.topic_path:
+            logger.error("Pub/Sub Publisherが初期化されてないため、メッセージを送信できません。")
+            return
+
+        try:
+            # データをJSON形式のバイト文字列にエンコード
+            data = json.dumps(message_data, ensure_ascii=False).encode("utf-8")
+            # メッセージをパブリッシュ！
+            future = self.publisher.publish(self.topic_path, data)
+            # 送信結果を待つ（非同期なので、ここでは待たずにログだけ出す）
+            future.add_done_callback(lambda f: logger.info(f"📤 Pub/Subへのメッセージ送信完了: {f.result()}"))
+            # await future # ここで待つとブロッキングしちゃうので注意！
+        except Exception as e:
+            logger.error(f"💣 Pub/Subへのメッセージ送信中に予期せぬエラー: {e}", exc_info=True)
 
     async def _process_speech_stream(self):
         """
@@ -246,27 +288,46 @@ class SpeechProcessor:
                     continue
 
                 transcript = result.alternatives[0].transcript
-                
-                # ワーカーにテキストデータを渡す
-                if self.sentiment_worker:
-                    # is_finalな文字起こしが生成された時刻も一緒に渡す！
-                    timestamp = time.time()
-                    await self.sentiment_worker.add_text(transcript, timestamp)
+                is_final = result.is_final
+                stability = result.stability
 
-                if result.is_final:
-                    logger.info(f"✅ 確定した文字起こし: {transcript}")
-                    # 全文文字起こしを更新
+                # リアルタイムでクライアントに文字起こし結果を送信！
+                timestamp = time.time()
+                await self._send_to_client(
+                    "interim_transcript" if not is_final else "final_transcript",
+                    {
+                        "transcript": transcript,
+                        "is_final": is_final,
+                        "stability": stability,
+                        "timestamp": timestamp,
+                    },
+                )
+
+                # Pub/Sub と感情分析ワーカーにテキストを送信！
+                # is_final か、ある程度安定した中間結果を送信するのが良さそう
+                if transcript and (is_final or stability > 0.8):
+                    # Pub/Subに送信するデータを作成
+                    pubsub_message = {
+                        "transcript": transcript,
+                        "is_final": is_final,
+                        "timestamp": timestamp,
+                        "session_id": "some_session_id", # TODO: セッションIDをちゃんと管理する
+                        "question": self.current_interview_question
+                    }
+                    # 非同期でPub/Subに送信
+                    asyncio.create_task(self._publish_to_pubsub(pubsub_message))
+
+                    # 感情分析は音声データを直接送るので、ここでは何もしない！
+                    # if self.sentiment_worker:
+                    #     await self.sentiment_worker.add_text(transcript, timestamp)
+
+                # is_finalがTrueなら、最終的な文章が確定したということ！
+                if is_final:
+                    logger.info(f"✅ 最終認識結果: '{transcript}'")
+                    # セッション全体の文字起こしを更新
                     self.full_transcript += transcript + " "
-                    await self._send_to_client(
-                        "final_transcript_segment", 
-                        {"transcript": transcript}
-                    )
                 else:
-                    # logger.info(f"💬 仮の文字起こし: {transcript}")
-                    await self._send_to_client(
-                        "interim_transcript",
-                        {"transcript": transcript}
-                    )
+                    logger.debug(f"💬 中間認識結果: '{transcript}' (安定度: {stability:.2f})")
         except asyncio.CancelledError:
             logger.info("🚫 _process_speech_stream タスクがキャンセルされました。")
             # キャンセル時は速やかに終了
