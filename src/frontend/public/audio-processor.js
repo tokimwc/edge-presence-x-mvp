@@ -30,13 +30,14 @@ class AudioProcessor extends AudioWorkletProcessor {
     // The input contains an array of channels. We only use the first channel.
     const inputChannel = inputs[0][0];
 
-    // If there is audio data, post it back to the main thread.
-    // We transfer the underlying ArrayBuffer to avoid copying, which is more efficient.
-    if (inputChannel) {
+    // inputChannelはFloat32Array
+    // もしデータがあれば、メインスレッドにそのバッファを送信する
+    // コピーを避けるために、ArrayBufferを直接転送 (transferable) するのが効率的
+    if (inputChannel instanceof Float32Array) {
       this.port.postMessage(inputChannel.buffer, [inputChannel.buffer]);
     }
 
-    // Return true to keep the processor alive.
+    // プロセッサをアクティブに保つためにtrueを返す
     return true;
   }
 }

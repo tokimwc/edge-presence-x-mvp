@@ -16,6 +16,7 @@ vertexai==1.47.0
 # --- Audio & Numerics ---
 pyaudio==0.2.14
 numpy==1.26.4
+scipy==1.13.1
 
 # --- Utilities ---
 aiohttp==3.9.5

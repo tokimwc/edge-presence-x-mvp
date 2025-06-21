@@ -21,7 +21,7 @@ class PitchWorker:
     """
     def __init__(self, sample_rate: int, channels: int, sample_width: int, 
                  min_freq: float = 50.0, max_freq: float = 600.0, 
-                 confidence_threshold: float = 0.2):
+                 confidence_threshold: float = 0.1):
         """
         PitchWorkerを初期化します。
 

@@ -173,7 +173,7 @@ export const useInterviewStore = defineStore('interview', () => {
         break;
       case 'pitch_analysis':
         const newPitchData: PitchData = {
-          timestamp: message.payload.timestamp,
+          timestamp: (message.payload.timestamp || Date.now() / 1000) * 1000, // バックエンドのPythonタイムスタンプ(s)をJS(ms)に変換
           pitch: message.payload.pitch,
         };
         pitchHistory.value.push(newPitchData);
@@ -285,16 +285,22 @@ export const useInterviewStore = defineStore('interview', () => {
       workletNode = new AudioWorkletNode(audioContext, 'audio-processor');
 
       workletNode.port.onmessage = (event) => {
-        if (socket?.readyState === WebSocket.OPEN && isInterviewActive.value) {
-          // event.data is the ArrayBuffer from the worklet
+        if (socket?.readyState === WebSocket.OPEN && interviewState.value === 'in_progress') {
+          // event.data は audio-processor.js から送られてきた ArrayBuffer
           const float32Data = new Float32Array(event.data);
           
-          // Convert to 16-bit PCM
+          // 16-bit PCM (Int16Array) に変換
           const pcmData = new Int16Array(float32Data.length);
           for (let i = 0; i < float32Data.length; i++) {
-            let s = Math.max(-1, Math.min(1, float32Data[i]));
-            pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            // -1.0 から 1.0 の範囲にクリッピング
+            const s = Math.max(-1, Math.min(1, float32Data[i]));
+            // 16ビット整数にスケーリング
+            // s < 0 ? s * 0x8000 : s * 0x7FFF;
+            // 32767.0 は 16bit符号付き整数の最大値
+            pcmData[i] = s * 32767.0;
           }
+          
+          // WebSocket経由でバイナリデータを送信
           socket.send(pcmData.buffer);
         }
       };

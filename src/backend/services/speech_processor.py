@@ -96,6 +96,16 @@ class SpeechProcessor:
         self.pitch_values = []    # ピッチの測定値を保持
         self.last_pitch_analysis_summary = {} # ピッチ解析の集計結果
         self.last_emotion_analysis_summary = {} # 感情分析の集計結果
+        
+        # --- ピッチ解析用のバッファと設定を追加 ---
+        self._pitch_buffer = b""
+        self._required_pitch_bytes = 0
+        if self.pitch_worker:
+            # pitch_workerが必要とする最小サンプル数(max_lag)の2倍をバイト数で計算
+            # 2倍にすることで、より安定した解析が期待できる
+            # 例: 16000Hz / 50Hz(min_freq) = 320サンプル -> 320 * 2(bytes) * 2 = 1280バイト
+            self._required_pitch_bytes = self.pitch_worker.max_lag * self.pitch_worker.sample_width * 2
+            logger.info(f"ピッチ解析に必要な最小バイト数: {self._required_pitch_bytes}")
         # --- ここまでセッションデータ変数 ---
 
     async def process_audio_chunk(self, chunk: bytes):
@@ -106,12 +116,28 @@ class SpeechProcessor:
         if not self._is_running:
             return
 
-        # 1. ピッチを解析
-        if self.pitch_worker:
-            pitch = self.pitch_worker.analyze_pitch(chunk)
-            if pitch is not None:
-                self.pitch_values.append(pitch)
-                # logger.debug(f"🎤 検出されたピッチ: {pitch:.2f} Hz") # デバッグ用に便利
+        # 1. ピッチを解析 (バッファリング方式に変更)
+        if self.pitch_worker and self._required_pitch_bytes > 0:
+            self._pitch_buffer += chunk
+
+            # バッファが十分な大きさになったら解析
+            if len(self._pitch_buffer) >= self._required_pitch_bytes:
+                pitch = self.pitch_worker.analyze_pitch(self._pitch_buffer)
+                
+                if pitch is not None:
+                    # 最終評価用に蓄積
+                    self.pitch_values.append(pitch)
+                    # リアルタイムでクライアントに送信！
+                    timestamp = time.time()
+                    await self._send_to_client(
+                        "pitch_analysis",
+                        {"pitch": pitch, "timestamp": timestamp}
+                    )
+                
+                # バッファをスライドさせる (古いデータを削除)
+                # 今回は解析ウィンドウの半分を削除して、次の解析とオーバーラップさせる
+                slide_bytes = self._required_pitch_bytes // 2
+                self._pitch_buffer = self._pitch_buffer[slide_bytes:]
 
         # 2. 文字起こし用のキューに音声データを追加
         if not self._stop_event.is_set():
@@ -365,6 +391,7 @@ class SpeechProcessor:
         # --- セッションデータをリセット ---
         self.full_transcript = ""
         self.pitch_values = []
+        self._pitch_buffer = b"" # ピッチ解析バッファもリセット
         self.last_pitch_analysis_summary = {}
         self.last_emotion_analysis_summary = {}
         # --- ここまで ---
@@ -387,6 +414,7 @@ class SpeechProcessor:
         # --- セッションデータをリセット ---
         self.full_transcript = ""
         self.pitch_values = []
+        self._pitch_buffer = b"" # ピッチ解析バッファもリセット
         self.last_pitch_analysis_summary = {}
         self.last_emotion_analysis_summary = {}
         # --- ここまで ---
