@@ -6,8 +6,9 @@ attrs==25.3.0
 cachetools==5.5.2
 certifi==2025.4.26
 charset-normalizer==3.4.2
-click==8.2.1
+click
 colorama==0.4.6
+deepeval
 dnspython==2.7.0
 docstring_parser==0.16
 email_validator==2.2.0
@@ -24,6 +25,8 @@ google-cloud-core==2.4.3
 google-cloud-language==2.13.3
 google-cloud-resource-manager==1.14.2
 google-cloud-speech==2.25.0
+google-cloud-dialogflow
+google-cloud-pubsub==2.20.0
 google-cloud-storage==2.19.0
 google-crc32c==1.7.1
 google-resumable-media==2.7.2
@@ -44,10 +47,10 @@ mdurl==0.1.2
 multidict==6.4.4
 numpy==1.26.4
 orjson==3.10.18
-packaging==25.0
+packaging
 propcache==0.3.1
 proto-plus==1.26.1
-protobuf==4.25.8
+protobuf
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
 PyAudio==0.2.14
@@ -60,7 +63,7 @@ python-dotenv==1.0.1
 python-multipart==0.0.20
 PyYAML==6.0.2
 requests==2.32.3
-rich==14.0.0
+rich
 rich-toolkit==0.14.7
 rsa==4.9.1
 scipy==1.13.1
@@ -78,5 +81,5 @@ urllib3==2.4.0
 uvicorn==0.29.0
 vertexai==1.47.0
 watchfiles==1.0.5
-websockets==12.0
+websockets
 yarl==1.20.0

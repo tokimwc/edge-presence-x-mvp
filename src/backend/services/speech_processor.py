@@ -9,6 +9,7 @@ import time
 import threading
 from google.cloud import pubsub_v1 # ◀️ Pub/Subライブラリをインポート！
 import json
+import uuid # ◀️ セッションID生成のために追加！
 
 # --- Pythonのモジュール検索パスにsrcディレクトリを追加 ---
 import sys
@@ -23,7 +24,7 @@ if _SRC_DIR not in sys.path:
 # --- サービス、ワーカー、設定ファイルのインポート ---
 from backend.services import gemini_service # gemini_serviceモジュールとしてインポート！
 from backend.workers.pitch_worker import PitchWorker
-from backend.workers.sentiment_worker import SentimentWorker
+from backend.services import dialogflow_service # ◀️ sentiment_worker の代わりに dialogflow_service をインポート！
 # 新しく作った共通設定ファイルをインポート！
 from backend.shared_config import RATE, CHUNK, CHANNELS, FORMAT, SAMPLE_WIDTH
 
@@ -62,6 +63,7 @@ class SpeechProcessor:
         self.pyaudio_instance = None
         self.microphone_stream = None
         self.send_to_client_callback = None # 送信コールバック関数
+        self.session_id = str(uuid.uuid4()) # ◀️ 各セッションでユニークなIDを生成！
 
         # --- Pub/Sub Publisherの初期化 ---
         try:
@@ -85,23 +87,6 @@ class SpeechProcessor:
         except Exception as e:
             logger.exception("😱 PitchWorker の初期化中にエラーが発生しました。")
             self.pitch_worker = None
-
-        # --- Symbl.ai SentimentWorker の初期化 ---
-        # TODO: access_tokenとconnection_idを動的に取得する処理を追加する
-        self.symbl_access_token = os.getenv("SYMBL_API_KEY", "your_symbl_api_key")
-        self.symbl_connection_id = "some_unique_connection_id" # 本来はAPI経由で取得
-
-        try:
-            self.sentiment_worker = SentimentWorker(
-                on_emotion_callback=self._handle_emotion_data,
-                access_token=self.symbl_access_token,
-                connection_id=self.symbl_connection_id
-            )
-            logger.info("😊 Symbl.ai SentimentWorker の初期化に成功しました。")
-        except Exception as e:
-            logger.exception("😱 Symbl.ai SentimentWorker の初期化中にエラーが発生しました。")
-            self.sentiment_worker = None
-        # --- ここまでSentimentWorker初期化 ---
 
         logger.info("✨ SpeechProcessor 初期化完了！✨")
         logger.info(f"PyAudio設定: FORMAT={FORMAT}, CHANNELS={CHANNELS}, RATE={RATE}, CHUNK={CHUNK}, SAMPLE_WIDTH={SAMPLE_WIDTH}")
@@ -163,27 +148,23 @@ class SpeechProcessor:
                 slide_bytes = self._required_pitch_bytes // 2
                 self._pitch_buffer = self._pitch_buffer[slide_bytes:]
 
-        # 2. Symbl.aiに音声データを送信
-        if self.sentiment_worker:
-            await self.sentiment_worker.send_audio(chunk)
+        # 2. Symbl.aiへの音声データ送信は不要になったので削除！
 
         # 3. 文字起こし用のキューに音声データを追加
         if not self._stop_event.is_set():
             await self._audio_queue.put(chunk)
 
     async def _start_workers(self):
-        """感情分析ワーカーを起動するよん！"""
+        """ワーカーの起動処理（現在は空）"""
         # PitchWorkerは都度呼び出すので、ここでは起動しない
-        if self.sentiment_worker:
-            # startが非同期メソッドの可能性があるのでawaitする
-            await self.sentiment_worker.start()
+        # SentimentWorkerもいなくなったので、ここは空っぽ！
+        pass
 
     async def _stop_workers(self):
-        """感情分析ワーカーを停止するよん！"""
+        """ワーカーの停止処理（現在は空）"""
         # PitchWorkerは都度呼び出すので、ここでは停止しない
-        if self.sentiment_worker:
-            # stopが非同期メソッドの可能性があるのでawaitする
-            await self.sentiment_worker.stop()
+        # SentimentWorkerもいなくなったので、ここは空っぽ！
+        pass
 
     def _get_pyaudio_instance(self):
         """PyAudioのインスタンスを取得または生成するよ。マイクテストの時だけね！"""
@@ -217,28 +198,7 @@ class SpeechProcessor:
         self.current_interview_question = question
         logger.info(f"🎤 設定された面接の質問: {question}")
 
-    def _handle_emotion_data(self, emotion_data: dict):
-        """
-        SentimentWorkerからの感情分析結果を処理するコールバック関数。
-        """
-        # Symbl.aiからのデータ構造に合わせて調整
-        # 例: {'type': 'emotion', 'emotion': {'label': 'neutral', 'score': 0.9, ...}}
-        emotion_label = emotion_data.get("emotion", {}).get("label", "unknown")
-        score = emotion_data.get("emotion", {}).get("score", 0)
-        
-        logger.info(f"😊 感情分析結果 (Symbl.ai): 感情={emotion_label}, スコア={score:.2f}")
-
-        # 最終評価用に最新のデータを保存しておく
-        self.last_emotion_analysis_summary = {
-            "dominant_emotion": emotion_label,
-            "emotion_score": score,
-            "emotion_intensity": "N/A", # Symbl.aiのEmotion APIには強度の概念はなさそう
-            "emotion_transition": "N/A" # リアルタイムなので推移は別途記録が必要
-        }
-
-        # メインスレッドのイベントループで、クライアントへの送信タスクをスケジュール
-        coro = self._send_to_client("sentiment_analysis", emotion_data)
-        asyncio.run_coroutine_threadsafe(coro, self.main_loop)
+    # --- Symbl.ai用の _handle_emotion_data は不要になったので完全に削除！ ---
 
     async def _publish_to_pubsub(self, message_data: dict):
         """
@@ -256,28 +216,49 @@ class SpeechProcessor:
             # 送信結果を待つ（非同期なので、ここでは待たずにログだけ出す）
             future.add_done_callback(lambda f: logger.info(f"📤 Pub/Subへのメッセージ送信完了: {f.result()}"))
             # await future # ここで待つとブロッキングしちゃうので注意！
+        except exceptions.GoogleAPICallError as e:
+            logger.error(f"😱 Pub/Subへの送信中にAPIエラーが発生しました: {e}")
         except Exception as e:
-            logger.error(f"💣 Pub/Subへのメッセージ送信中に予期せぬエラー: {e}", exc_info=True)
+            logger.exception("😱 Pub/Subへの送信中に予期せぬエラーが発生しました。")
 
     async def _process_speech_stream(self):
         """
-        キューからの音声データをGoogleに送り、結果を処理するメインループだよん！
-        WebSocketからのストリーム用に調整したバージョン。
+        音声ストリームを処理して、文字起こしと各種分析を実行するメインループだよん。
         """
         try:
-            # 1. Google Speech-to-Text APIに接続し、ストリーミング設定を送信
-            stream_generator = self._microphone_stream_generator()
-            # streaming_recognizeはイテレータを返すコルーチンなので、awaitで解決する
-            responses_iterator = await self.speech_client.streaming_recognize(requests=stream_generator)
-            logger.info("✅ Google Speech-to-Text APIとの接続完了！レスポンス待機中...")
+            # --- 1. 音声ストリームの生成 ---
+            audio_stream_generator = self._audio_stream_generator()
 
-            # 2. ワーカープロセスを開始
-            await self._start_workers()
+            # --- 2. Google Cloud Speech-to-Text APIへのリクエスト設定 ---
+            # ...（中略）...
+            recognition_config = speech.RecognitionConfig(
+                encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+                sample_rate_hertz=RATE,
+                language_code="ja-JP",
+                enable_automatic_punctuation=True,
+                profanity_filter=True, # 不適切な単語をフィルタリング
+            )
+            streaming_config = speech.StreamingRecognitionConfig(
+                config=recognition_config,
+                interim_results=True, # 暫定的な結果も受け取る
+            )
 
-            # 3. レスポンスを非同期で処理
-            async for response in responses_iterator:
-                if not self._is_running or self._stop_event.is_set():
-                    logger.info("is_runningがFalseまたはstop_eventがセットされたため、レスポンス処理ループを中断します。")
+            # --- 3. ストリーミングリクエストの作成と実行 ---
+            requests = (
+                speech.StreamingRecognizeRequest(audio_content=chunk)
+                for chunk in audio_stream_generator
+            )
+
+            logger.info("🚀 Google Speech-to-Text APIへのストリーミングを開始します...")
+            # recognizeメソッドは非同期イテレータを返す！
+            stream = await self.speech_client.streaming_recognize(
+                requests=requests,
+                config=streaming_config,
+            )
+
+            # --- 4. レスポンスの処理 ---
+            async for response in stream:
+                if not self._is_running:
                     break
 
                 if not response.results:
@@ -286,70 +267,65 @@ class SpeechProcessor:
                 result = response.results[0]
                 if not result.alternatives:
                     continue
-
+                
                 transcript = result.alternatives[0].transcript
-                is_final = result.is_final
-                stability = result.stability
-
-                # リアルタイムでクライアントに文字起こし結果を送信！
                 timestamp = time.time()
-                await self._send_to_client(
-                    "interim_transcript" if not is_final else "final_transcript",
-                    {
-                        "transcript": transcript,
-                        "is_final": is_final,
-                        "stability": stability,
-                        "timestamp": timestamp,
-                    },
-                )
 
-                # Pub/Sub と感情分析ワーカーにテキストを送信！
-                # is_final か、ある程度安定した中間結果を送信するのが良さそう
-                if transcript and (is_final or stability > 0.8):
-                    # Pub/Subに送信するデータを作成
-                    pubsub_message = {
-                        "transcript": transcript,
-                        "is_final": is_final,
-                        "timestamp": timestamp,
-                        "session_id": "some_session_id", # TODO: セッションIDをちゃんと管理する
-                        "question": self.current_interview_question
-                    }
-                    # 非同期でPub/Subに送信
-                    asyncio.create_task(self._publish_to_pubsub(pubsub_message))
-
-                    # 感情分析は音声データを直接送るので、ここでは何もしない！
-                    # if self.sentiment_worker:
-                    #     await self.sentiment_worker.add_text(transcript, timestamp)
-
-                # is_finalがTrueなら、最終的な文章が確定したということ！
-                if is_final:
-                    logger.info(f"✅ 最終認識結果: '{transcript}'")
-                    # セッション全体の文字起こしを更新
+                if result.is_final:
+                    logger.info(f"✅ 最終的な文字起こし結果: '{transcript}'")
                     self.full_transcript += transcript + " "
-                else:
-                    logger.debug(f"💬 中間認識結果: '{transcript}' (安定度: {stability:.2f})")
-        except asyncio.CancelledError:
-            logger.info("🚫 _process_speech_stream タスクがキャンセルされました。")
-            # キャンセル時は速やかに終了
-            raise
-        except StopAsyncIteration:
-             logger.info("ストリームが正常に終了しました。")
-        except exceptions.OutOfRange as e:
-            # 音声タイムアウトエラーをここでキャッチ！
-            logger.error(f"😱 音声タイムアウトエラーが発生しました: {e}")
-            await self._send_to_client("error", {"message": "長時間音声が検出されなかったため、タイムアウトしました。"})
-        except Exception as e:
-            logger.error(f"😱 _process_speech_streamで予期せぬエラー発生: {e}", exc_info=True)
-            await self._send_to_client("error", {"message": f"音声処理中に予期せぬエラーが発生しました: {e}"})
-        finally:
-            logger.info("🏁 _process_speech_stream ループが終了しました。")
-            # ここでワーカーを停止するのが確実！
-            await self._stop_workers()
+                    
+                    # --- 🔽 ここからが新しい処理！ 🔽 ---
+                    # 1. 最終結果をPub/Subに送信（これはもともとあった処理）
+                    pubsub_message = {
+                        "text": transcript,
+                        "timestamp": timestamp,
+                        "session_id": self.session_id
+                    }
+                    await self._publish_to_pubsub(pubsub_message)
 
-    async def _microphone_stream_generator(self):
+                    # 2. Dialogflowで感情分析を実行！
+                    logger.info(f"🤖 Dialogflowに感情分析をリクエスト: '{transcript}'")
+                    sentiment_result = dialogflow_service.analyze_sentiment(
+                        session_id=self.session_id,
+                        text=transcript
+                    )
+                    
+                    if sentiment_result:
+                        logger.info(f"😊 Dialogflowからの感情分析結果: {sentiment_result}")
+                        # フロントエンドに送信
+                        await self._send_to_client("sentiment_analysis", sentiment_result)
+                        # 最終評価用に保存
+                        self.last_emotion_analysis_summary = {
+                            "score": sentiment_result.get("score"),
+                            "magnitude": sentiment_result.get("magnitude")
+                        }
+                    else:
+                        logger.warning("😢 Dialogflowでの感情分析に失敗しました。")
+                    # --- 🔼 ここまでが新しい処理！ 🔼 ---
+
+                else:
+                    # 暫定的な結果をクライアントに送信
+                    await self._send_to_client(
+                        "interim_transcript",
+                        {"text": transcript, "timestamp": timestamp}
+                    )
+
+        except exceptions.Cancelled as e:
+            logger.warning("ストリーミングがキャンセルされました。これは正常な停止処理の一部である可能性があります。")
+        except exceptions.OutOfRange as e:
+            logger.error(f"😱 音声ストリームの終端に達しました: {e}")
+        except exceptions.GoogleAPICallError as e:
+            logger.error(f"😱 Google Speech APIの呼び出しでエラー: {e}")
+        except Exception as e:
+            logger.exception("😱 _process_speech_streamで予期せぬエラーが発生しました。")
+        finally:
+            logger.info("👋 _process_speech_stream ループが終了しました。")
+            self._stop_event.set()
+
+    async def _audio_stream_generator(self):
         """
-        キューから音声データを読み取ってGoogle APIにストリーミングする非同期ジェネレータ。
-        WebSocketからのリアルタイム音声入力に対応してるよん！
+        _audio_queueから音声チャンクを取り出して、Google APIに送れる形式でyieldする非同期ジェネレータ。
         """
         # 1. 最初にストリーミング設定を送信
         recognition_config = speech.RecognitionConfig(
@@ -380,7 +356,7 @@ class SpeechProcessor:
                 # タイムアウトはエラーじゃない。データが来てないだけだからループを続ける
                 continue
             except asyncio.CancelledError:
-                logger.info("🎤 _microphone_stream_generatorがキャンセルされました。")
+                logger.info("🎤 _audio_stream_generatorがキャンセルされました。")
                 break
         
         logger.info("🎤 音声ストリームジェネレータが終了します。")

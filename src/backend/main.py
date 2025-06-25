@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 # --- FastAPIアプリの初期化 ---
 app = FastAPI()
 
+@app.get("/")
+async def root():
+    return {"message": "EP-X Backend is running! Access /docs for API documentation."}
+
 # --- WebSocketエンドポイント ---
 @app.websocket("/ws/v1/interview")
 async def websocket_handler(websocket: WebSocket):
