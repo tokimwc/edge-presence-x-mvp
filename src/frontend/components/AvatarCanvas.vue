@@ -22,8 +22,16 @@ const init = async () => {
     try {
       await controller.load('/Limone.vrm');
       logger.info('🤖 VRMモデルの読み込みと初期化が完了しました。');
+
+      controller.setPose({
+        rightUpperArm: { rotation: [0.0, 0.0, -0.4, 0.9] },
+        leftUpperArm: { rotation: [0.0, 0.0, 0.4, 0.9] },
+      });
+
       const vrm = controller.vrmModel;
       if (vrm) {
+        vrm.humanoid.autoUpdateHumanBones = false;
+
         const target = (controller as any).lookAtTarget ?? new THREE.Object3D();
         idle = new IdleAnimation(vrm, target);
         idle.start();

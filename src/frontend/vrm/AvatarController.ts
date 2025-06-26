@@ -29,6 +29,12 @@ export class AvatarController {
     return this.vrm;
   }
 
+  public setPose(pose: any) {
+    if (this.vrm?.humanoid) {
+      this.vrm.humanoid.setRawPose(pose);
+    }
+  }
+
   constructor(private canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
@@ -50,7 +56,7 @@ export class AvatarController {
     const dir = new THREE.DirectionalLight(0xffffff, 3)
     dir.position.set(2, 3, 5)
     this.scene.add(amb, dir)
-    this.renderer.outputEncoding = THREE.sRGBEncoding
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
 
     this.scene.add(this.lookAtTarget);
@@ -123,10 +129,14 @@ export class AvatarController {
 
   private setMouth(value: number) {
     if (!this.vrm) return;
-    const expression = this.vrm.expressionManager;
-    if (expression) {
-      expression.setValue(VRMExpressionPresetName.A, value);
-    }
+    this.vrm.expressionManager?.setValue(
+      VRMExpressionPresetName.Aa,
+      value * 0.7
+    );
+    this.vrm.expressionManager?.setValue(
+      VRMExpressionPresetName.Oh,
+      value * 0.1
+    );
   }
 
   setExpression(name: VRMExpressionPresetName, value: number) {
