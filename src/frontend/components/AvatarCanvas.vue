@@ -20,7 +20,7 @@ const init = async () => {
   if (canvasRef.value && !controller) {
     controller = new AvatarController(canvasRef.value);
     try {
-      await controller.load('https://pixiv.github.io/three-vrm/models/VRM1_Alicia_Solid.vrm');
+      await controller.load('/VRM1_Alicia_Solid.vrm');
       logger.info('🤖 VRMモデルの読み込みと初期化が完了しました。');
       const vrm = controller.vrmModel;
       if (vrm) {
