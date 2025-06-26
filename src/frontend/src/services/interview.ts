@@ -1,5 +1,5 @@
 import logger from '@/lib/logger';
-import { useInterviewStore } from '@/stores/interviewStore';
+import { useInterviewStore } from '@/frontend/stores/interview';
 import { ref } from 'vue';
 
 const isInitialized = ref(false);
@@ -107,74 +107,87 @@ async function startAudioStreaming(stream: MediaStream) {
  * マイクからのストリームトラックを停止し、AudioWorkletノードをクリーンアップします。
  */
 function stopAudioStreaming() {
-  if (mediaStream) {
-    mediaStream.getTracks().forEach((track) => track.stop());
-    mediaStream = null;
-    logger.info('🎤 マイクのトラックを停止しました。');
-  }
+  const store = useInterviewStore();
 
+  if (audioWorkletNode) {
+    audioWorkletNode.disconnect();
+    audioWorkletNode = null;
+    logger.info('🎤 AudioWorkletを停止しました。');
+  }
   if (sourceNode) {
     sourceNode.disconnect();
     sourceNode = null;
-    logger.info('🎧 ソースノードを切断しました。');
+  }
+  if (mediaStream) {
+    mediaStream.getTracks().forEach(track => track.stop());
+    mediaStream = null;
+    logger.info('🎤 MediaStreamを停止しました。');
+  }
+  if (audioContext && audioContext.state !== 'closed') {
+    audioContext.close();
+    logger.info('🎧 AudioContextをクローズしました。');
   }
 
-  if (audioWorkletNode) {
-    audioWorkletNode.port.close();
-    audioWorkletNode.disconnect();
-    audioWorkletNode = null;
-    logger.info('🎧 AudioWorkletノードを切断・クリーンアップしました。');
+  // サーバーにセッション終了を通知
+  if (store.connectionState === 'connected') {
+    socket?.send(JSON.stringify({ type: 'end_session' }));
+    logger.info('🔌 セッション終了をサーバーに通知しました。');
   }
-
-  // AudioContextはすぐには閉じない。もし閉じると次の面接で再作成が必要になる。
-  // if (audioContext && audioContext.state !== 'closed') {
-  //   audioContext.close();
-  //   audioContext = null;
-  // }
-
-  logger.info('🛑 音声ストリーミングを停止しました。');
 }
 
 /**
- * WebSocketサーバーに接続します。
+ * WebSocketを切断します。
+ */
+function disconnectWebSocket() {
+  const store = useInterviewStore();
+  if (socket) {
+    socket.close();
+    socket = null;
+    logger.info('🔌 WebSocketを切断しました。');
+  }
+  store.connectionState = 'disconnected';
+}
+
+/**
+ * WebSocket接続を初期化し、イベントハンドラを設定します。
  * @param {string} url - 接続先のWebSocket URL
  * @param {(event: MessageEvent) => void} onMessageCallback - メッセージ受信時のコールバック
  */
 function connectWebSocket(url: string, onMessageCallback: (event: MessageEvent) => void) {
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    logger.warn('⚠️ WebSocketはすでに接続されています。');
+  const store = useInterviewStore();
+
+  // 既に接続されている、または接続中の場合は何もしない
+  if (store.connectionState === 'connected' || store.connectionState === 'connecting') {
+    logger.info(`🔌 WebSocketはすでに接続済みまたは接続中です。(状態: ${store.connectionState})`);
     return;
   }
+  
+  store.connectionState = 'connecting';
+  logger.info(`🔌 WebSocket接続を開始します... URL: ${url}`);
 
   socket = new WebSocket(url);
 
   socket.onopen = () => {
-    logger.info('✅ WebSocket接続が確立しました。');
-    const interviewStore = useInterviewStore();
-    interviewStore.isWebSocketConnected = true;
+    store.connectionState = 'connected';
+    logger.info('✅ WebSocket接続が確立しました！');
   };
 
   socket.onmessage = onMessageCallback;
 
   socket.onerror = (event) => {
     logger.error('❌ WebSocketエラーが発生しました:', event);
+    store.connectionState = 'disconnected';
+    // 必要であれば、エラー内容をストアに保存する
+    // store.setErrorMessage('WebSocketエラーが発生しました。');
   };
 
   socket.onclose = (event) => {
-    logger.info(`🔌 WebSocket接続が閉じられました: Code=${event.code}, Reason=${event.reason}`);
-    const interviewStore = useInterviewStore();
-    interviewStore.isWebSocketConnected = false;
-    socket = null; // 閉じたソケットはnullにする
+    // 意図しない切断の場合のみ'disconnected'に設定
+    if (store.connectionState !== 'disconnected') {
+      logger.warn(`🔌 WebSocket接続がクローズされました。Code: ${event.code}, Reason: ${event.reason}`);
+      store.connectionState = 'disconnected';
+    }
   };
-}
-
-/**
- * WebSocket接続を切断します。
- */
-function disconnectWebSocket() {
-  if (socket) {
-    socket.close();
-  }
 }
 
 /**
@@ -207,7 +220,8 @@ export async function startInterview(onMessageCallback: (event: MessageEvent) =>
   try {
     const stream = await getMediaStream();
     
-    const wsUrl = `ws://${window.location.hostname}:8000/ws/v1/interview`;
+    // const wsUrl = `ws://${window.location.hostname}:8000/ws/v1/interview`;
+    const wsUrl = `wss://ep-x-backend-495003035191.asia-northeast1.run.app/ws/v1/interview`;
     connectWebSocket(wsUrl, onMessageCallback);
     
     await new Promise<void>((resolve, reject) => {
@@ -237,16 +251,13 @@ export async function startInterview(onMessageCallback: (event: MessageEvent) =>
 }
 
 /**
- * 面接を停止する
+ * 面接を完全に停止し、リソースを解放します。
  */
 export async function stopInterview() {
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ action: 'stop' }));
-    logger.info('⏹️ 面接停止の合図を送信しました。');
-  }
-
+  logger.info('🛑 面接の完全停止プロセスを開始します...');
   stopAudioStreaming();
-
-  // サーバーからの最終評価を受け取るために、すぐには切断しない
-  // disconnectWebSocket();
+  disconnectWebSocket();
+  const store = useInterviewStore();
+  store.$reset(); // Piniaストアを初期状態にリセット
+  logger.info('✅ 面接の全リソースを解放し、ストアをリセットしました。');
 } 

@@ -214,7 +214,8 @@ export const useInterviewStore = defineStore('interview', () => {
     connectionState.value = 'connecting';
 
     // Viteの開発サーバーのプロキシを経由して接続
-    const socketUrl = `ws://${window.location.host}/ws/v1/interview`;
+    // const socketUrl = `ws://${window.location.host}/ws/v1/interview`;
+    const socketUrl = 'wss://ep-x-backend-495003035191.asia-northeast1.run.app/ws/v1/interview';
     socket = new WebSocket(socketUrl);
 
     socket.onopen = () => {
