@@ -5,6 +5,7 @@ import os
 import sys
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import uvicorn
@@ -28,7 +29,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- FastAPIアプリの初期化 ---
-app = FastAPI()
+app = FastAPI(
+    title="Edge Presence X (EP-X) Backend",
+    description="リアルタイム音声解析&AI評価API",
+    version="1.0.0",
+)
+
+# --- CORSミドルウェアの設定 ---
+# ローカル開発中のフロントエンドからの接続を許可する
+origins = [
+    "http://localhost",
+    "http://localhost:5173",  # Viteのデフォルトポート
+    "http://localhost:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 async def root():

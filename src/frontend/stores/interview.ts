@@ -108,33 +108,34 @@ export const useInterviewStore = defineStore('interview', () => {
     console.log("📨 メッセージ受信:", message);
     switch (message.type) {
       case 'interim_transcript':
-        // 最後の一時的な文字起こしを更新
-        const lastTranscription = transcriptions.value[transcriptions.value.length - 1];
-        if (lastTranscription && !lastTranscription.is_final) {
-          lastTranscription.text = message.payload.transcript;
+        const latestTranscription = transcriptions.value[transcriptions.value.length - 1];
+        if (latestTranscription && !latestTranscription.is_final) {
+          latestTranscription.text = message.payload.text;
+          latestTranscription.timestamp = message.payload.timestamp * 1000;
         } else {
           transcriptions.value.push({
-            text: message.payload.transcript,
+            text: message.payload.text,
             is_final: false,
-            timestamp: Date.now(),
+            timestamp: message.payload.timestamp * 1000,
           });
         }
         break;
-      case 'final_transcript_segment':
-        // 最後の一時的な文字起こしを確定させるか、新しい確定セグメントを追加
-        const finalLast = transcriptions.value[transcriptions.value.length - 1];
-         if (finalLast && !finalLast.is_final) {
-           finalLast.text = message.payload.transcript;
-           finalLast.is_final = true;
-         } else {
-            transcriptions.value.push({
-              text: message.payload.transcript,
-              is_final: true,
-              timestamp: Date.now(),
-            });
-         }
-        // 次の文字起こしのために、新しい一時的なプレースホルダを追加
-        transcriptions.value.push({ text: '...', is_final: false, timestamp: Date.now() + 1 });
+      case 'final_transcript':
+        const lastIdx = transcriptions.value.length - 1;
+        if (lastIdx >= 0 && !transcriptions.value[lastIdx].is_final) {
+          transcriptions.value[lastIdx] = {
+            text: message.payload.text,
+            is_final: true,
+            timestamp: message.payload.timestamp * 1000,
+          };
+        } else {
+           transcriptions.value.push({
+            text: message.payload.text,
+            is_final: true,
+            timestamp: message.payload.timestamp * 1000,
+          });
+        }
+        transcriptions.value.push({ text: '...', is_final: false, timestamp: Date.now() });
         break;
       case 'evaluation_started':
         isEvaluating.value = true;
@@ -213,9 +214,9 @@ export const useInterviewStore = defineStore('interview', () => {
 
     connectionState.value = 'connecting';
 
-    // Viteの開発サーバーのプロキシを経由して接続
-    // const socketUrl = `ws://${window.location.host}/ws/v1/interview`;
-    const socketUrl = 'wss://ep-x-backend-495003035191.asia-northeast1.run.app/ws/v1/interview';
+    // 環境変数からWebSocketのURLを取得。なければハードコードされたURLをフォールバックとして使用
+    const socketUrl = import.meta.env.VITE_WEBSOCKET_URL || 'wss://ep-x-backend-495003035191.asia-northeast1.run.app/ws/v1/interview';
+    console.log(`🔌 Connecting to WebSocket at: ${socketUrl}`);
     socket = new WebSocket(socketUrl);
 
     socket.onopen = () => {

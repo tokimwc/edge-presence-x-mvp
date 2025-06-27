@@ -172,16 +172,18 @@ python tests/manual_test_speech_processor.py
 ```
 マイクに向かって話しかけると、リアルタイムで文字起こしとAIによる評価がターミナルに表示されます。
 
+## ☁️ デプロイ (Deployment)
+
+このアプリケーションのバックエンドはGoogle Cloud Runにデプロイ可能です。
+
+- **🌐 フロントエンドURL:** `[デプロイ先のURLをここに記述]`
+- **⚙️ バックエンドURL:** `[デプロイ先のURLをここに記述]`
+
+バックエンドの詳しいデプロイ手順については、以下のドキュメントを参照してください。
+
+- **[📄 GCPデプロイ手順書 (`/docs/DEPLOYMENT.md`)](./docs/DEPLOYMENT.md)**
+
 ## Avatar Module
 
 Three.js と VRM を用いたアバター表示は `AvatarCanvas.vue` で管理します。内部では
-`IdleAnimation` と `LipSync` クラスが実行され、マイク入力から口パクを生成します。
-`avatar/reset` イベントを受け取ると、各クラスと WebGL リソースが解放されます。
-
-## 🎖️ ハッカソン目標
-
-**Google Cloud Japan AI Hackathon Vol.2** 参加プロジェクト
-- ⏰ 24時間以内にMVP完成
-- 📱 GitHub + Devpost提出 (MIT License)
-- 🏆 AI Agent部門でのイノベーション評価
-
+`
