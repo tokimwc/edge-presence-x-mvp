@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { Splitpanes, Pane } from 'splitpanes';
+import 'splitpanes/dist/splitpanes.css';
 import InterviewControls from './InterviewControls.vue';
 import TranscriptionPanel from './TranscriptionPanel.vue';
 import AvatarCanvas from './AvatarCanvas.vue';
@@ -58,7 +60,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <v-container fluid class="fill-height">
+  <v-container fluid class="fill-height pa-0">
     <!-- Connection Status -->
     <v-row
       v-if="interviewStore.connectionState !== 'connected'"
@@ -138,71 +140,113 @@ onMounted(() => {
     </v-row>
 
     <!-- Main Interview Room -->
-    <v-row v-else class="fill-height">
+    <splitpanes v-else class="fill-height" style="height: 100%;">
       <!-- Left Panel: Avatar and Voice -->
-      <v-col cols="12" md="8" class="d-flex flex-column pa-2">
-        <v-card class="flex-grow-1 d-flex flex-column" elevation="2">
-          <div class="flex-grow-1 bg-black rounded-lg position-relative">
-            <AvatarCanvas class="w-100 h-100" />
-            <video
-              v-if="interviewStore.localStream"
-              ref="localVideo"
-              class="position-absolute top-0 right-0 ma-4 w-25 aspect-video rounded shadow-lg"
-              autoplay
-              playsinline
-              muted
-            />
-          </div>
-        </v-card>
-        <v-card class="mt-2 pa-2" elevation="2">
-          <VoiceAnalyzer />
-        </v-card>
-      </v-col>
+      <pane min-size="40">
+        <splitpanes horizontal style="height: 100%;">
+          <pane class="pa-2" style="padding-bottom: 4px;">
+            <v-card class="d-flex flex-column h-100" elevation="2">
+              <div class="flex-grow-1 bg-black rounded-lg position-relative">
+                <AvatarCanvas class="w-100 h-100" />
+                <video
+                  v-if="interviewStore.localStream"
+                  ref="localVideo"
+                  class="position-absolute top-0 right-0 ma-4 w-25 aspect-video rounded shadow-lg"
+                  autoplay
+                  playsinline
+                  muted
+                />
+              </div>
+            </v-card>
+          </pane>
+          <pane size="30" min-size="20" max-size="40" class="pa-2" style="padding-top: 4px;">
+            <v-card class="h-100 pa-2" elevation="2">
+              <VoiceAnalyzer class="h-100" />
+            </v-card>
+          </pane>
+        </splitpanes>
+      </pane>
 
       <!-- Right Panel: Tabs for Info -->
-      <v-col cols="12" md="4" class="d-flex flex-column pa-2">
-        <v-card class="flex-grow-1 d-flex flex-column" elevation="2">
-          <v-overlay
-            :model-value="interviewStore.interviewState === 'evaluating'"
-            class="align-center justify-center"
-            contained
-          >
-            <v-progress-circular
-              color="primary"
-              indeterminate
-              size="64"
-            ></v-progress-circular>
-            <div class="text-white mt-4">AIが評価中です...</div>
-          </v-overlay>
+      <pane min-size="30" max-size="50">
+        <div class="d-flex flex-column pa-2 fill-height">
+          <v-card class="flex-grow-1 d-flex flex-column" elevation="2">
+            <v-overlay
+              :model-value="interviewStore.interviewState === 'evaluating'"
+              class="align-center justify-center"
+              contained
+            >
+              <v-progress-circular
+                color="primary"
+                indeterminate
+                size="64"
+              ></v-progress-circular>
+              <div class="text-white mt-4">AIが評価中です...</div>
+            </v-overlay>
 
-          <v-tabs v-model="selectedTab" color="primary" grow>
-            <v-tab value="transcription">文字起こし</v-tab>
-            <v-tab value="star">STAR評価</v-tab>
-            <v-tab value="emotion">感情分析</v-tab>
-          </v-tabs>
-          <v-card-text class="flex-grow-1 overflow-y-auto">
-            <v-window v-model="selectedTab">
-              <v-window-item value="transcription">
-                <TranscriptionPanel />
-              </v-window-item>
-              <v-window-item value="star">
-                <STARFeedback />
-              </v-window-item>
-              <v-window-item value="emotion">
-                <div v-if="['in_progress', 'evaluating', 'finished'].includes(interviewStore.interviewState) && interviewStore.sentimentHistory.length > 0" class="pa-4">
-                    <EmotionHeatmap />
-                </div>
-                <div v-else class="text-center text-medium-emphasis pa-8">
-                    <p>面接を開始すると、ここに感情の分析結果がリアルタイムで表示されます。</p>
-                </div>
-              </v-window-item>
-            </v-window>
-          </v-card-text>
-        </v-card>
-        <div class="mt-4 d-flex justify-center">
-          <InterviewControls />
+            <v-tabs v-model="selectedTab" color="primary" grow>
+              <v-tab value="transcription">文字起こし</v-tab>
+              <v-tab value="star">STAR評価</v-tab>
+              <v-tab value="emotion">感情分析</v-tab>
+            </v-tabs>
+            <v-card-text class="flex-grow-1 overflow-y-auto">
+              <v-window v-model="selectedTab">
+                <v-window-item value="transcription">
+                  <TranscriptionPanel />
+                </v-window-item>
+                <v-window-item value="star">
+                  <STARFeedback />
+                </v-window-item>
+                <v-window-item value="emotion">
+                  <div v-if="['in_progress', 'evaluating', 'finished'].includes(interviewStore.interviewState) && interviewStore.sentimentHistory.length > 0" class="pa-4">
+                      <EmotionHeatmap />
+                  </div>
+                  <div v-else class="text-center text-medium-emphasis pa-8">
+                      <p>面接を開始すると、ここに感情の分析結果がリアルタイムで表示されます。</p>
+                  </div>
+                </v-window-item>
+              </v-window>
+            </v-card-text>
+          </v-card>
+          <div class="mt-4 d-flex justify-center">
+            <InterviewControls />
+          </div>
         </div>
-      </v-col>
-    </v-row>
+      </pane>
+    </splitpanes>
   </v-container>
-</template> 
+</template>
+
+<style>
+.splitpanes__splitter {
+  background-color: #2c2c2e;
+  position: relative;
+}
+
+.splitpanes__splitter:before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  transition: opacity 0.4s;
+  background-color: rgba(255, 255, 255, 0.2);
+  opacity: 0;
+  z-index: 1;
+}
+
+.splitpanes__splitter:hover:before {
+  opacity: 1;
+}
+
+.splitpanes--vertical > .splitpanes__splitter:before {
+  left: -2px;
+  right: -2px;
+  height: 100%;
+}
+
+.splitpanes--horizontal > .splitpanes__splitter:before {
+  top: -2px;
+  bottom: -2px;
+  width: 100%;
+}
+</style> 

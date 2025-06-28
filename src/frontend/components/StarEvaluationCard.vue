@@ -1,19 +1,23 @@
 <template>
-  <div class="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 w-full">
-    <div class="flex justify-between items-center mb-4">
-      <h2 class="text-xl font-bold text-gray-900 dark:text-white">{{ title }}</h2>
-       <span
-        v-if="score !== null && score !== undefined"
-        :class="getScoreColor(score)"
-        class="text-sm font-bold px-2.5 py-0.5 rounded-full"
-        data-testid="score-badge"
-      >
-        {{ score }} / 10
-      </span>
+  <div class="bg-gray-800/50 backdrop-blur-sm border border-gray-700 rounded-2xl shadow-lg overflow-hidden">
+    <div class="px-6 py-4 border-b border-gray-700">
+      <div class="flex justify-between items-center">
+        <h2 class="text-xl font-bold text-white">{{ title }}</h2>
+        <span
+          v-if="score !== null && score !== undefined"
+          :class="getScoreColor(score)"
+          class="text-sm font-bold px-2.5 py-0.5 rounded-full"
+          data-testid="score-badge"
+        >
+          {{ score }} / 10
+        </span>
+      </div>
     </div>
-    <div class="prose prose-sm max-w-none dark:prose-invert">
-      <p v-if="feedback" class="text-gray-600 dark:text-gray-300">{{ feedback }}</p>
-      <p v-else class="text-gray-500 dark:text-gray-400">フィードバックはありません。</p>
+    <div class="p-6">
+      <div class="prose prose-sm max-w-none prose-invert">
+        <p v-if="feedback" class="text-gray-300">{{ feedback }}</p>
+        <p v-else class="text-gray-400">フィードバックはありません。</p>
+      </div>
     </div>
   </div>
 </template>
