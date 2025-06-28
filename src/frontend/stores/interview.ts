@@ -245,58 +245,59 @@ export const useInterviewStore = defineStore('interview', () => {
   /**
    * WebSocketサーバーに接続します。
    */
-  function connect() {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      console.warn('WebSocket is already connected.');
-      return;
-    }
-
-    connectionState.value = 'connecting';
-
-    // 環境変数からWebSocketのURLを取得。なければハードコードされたURLをフォールバックとして使用
-    const socketUrl = import.meta.env.VITE_WEBSOCKET_URL || 'wss://ep-x-backend-495003035191.asia-northeast1.run.app/ws/v1/interview';
-    console.log(`🔌 Connecting to WebSocket at: ${socketUrl}`);
-    socket = new WebSocket(socketUrl);
-
-    socket.onopen = () => {
-      connectionState.value = 'connected';
-      console.log('🎉 WebSocket connection established!');
-    };
-
-    socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        handleWebsocketMessage(data); // 新しいハンドラを呼び出す
-      } catch (error) {
-        console.error('Error parsing WebSocket message:', error);
-        errorMessage.value = 'Failed to parse server message.';
+  function connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        console.warn('WebSocket is already connected.');
+        return resolve();
       }
-    };
 
-    socket.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      connectionState.value = 'error';
-      errorMessage.value = 'WebSocket connection failed.';
-    };
+      connectionState.value = 'connecting';
 
-    socket.onclose = () => {
-      connectionState.value = 'disconnected';
-      isInterviewActive.value = false; // 古い値も更新しておく
-      if (interviewState.value !== 'finished') {
-        interviewState.value = 'idle';
-      }
-      console.log('WebSocket connection closed.');
-    };
+      // 環境変数からWebSocketのURLを取得。なければハードコードされたURLをフォールバックとして使用
+      const socketUrl = import.meta.env.VITE_WEBSOCKET_URL || 'ws://localhost:8000/ws/v1/interview';
+      console.log(`🔌 Connecting to WebSocket at: ${socketUrl}`);
+      socket = new WebSocket(socketUrl);
+
+      socket.onopen = () => {
+        connectionState.value = 'connected';
+        console.log('🎉 WebSocket connection established!');
+        resolve();
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleWebsocketMessage(data); // 新しいハンドラを呼び出す
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
+          errorMessage.value = 'Failed to parse server message.';
+        }
+      };
+
+      socket.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        connectionState.value = 'error';
+        errorMessage.value = 'WebSocket connection failed.';
+        reject(error);
+      };
+
+      socket.onclose = () => {
+        connectionState.value = 'disconnected';
+        isInterviewActive.value = false; // 古い値も更新しておく
+        if (interviewState.value !== 'finished' && interviewState.value !== 'error') {
+          interviewState.value = 'idle';
+        }
+        console.log('WebSocket connection closed.');
+      };
+    });
   }
 
   /**
    * WebSocket接続を閉じます。
    */
   function disconnect() {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      if (isInterviewActive.value || interviewState.value === 'in_progress') {
-        stopInterview();
-      }
+    if (socket) {
       socket.close();
       socket = null;
     }
@@ -393,28 +394,33 @@ export const useInterviewStore = defineStore('interview', () => {
     errorMessage.value = null;
     transcriptions.value = [{ text: '...', is_final: false, timestamp: Date.now() }];
     evaluations.value = [];
-    pitchHistory.value = [];
-    sentimentHistory.value = [];
+    // pitchHistory と sentimentHistory はクリアしない (改善要望より)
     currentTranscription.value = '';
 
-    connect();
+    // interviewStateの変更がUIに反映されてから処理を進める
+    await new Promise(resolve => setTimeout(resolve, 0));
 
-    // DOM更新を待ってからストリーミングを開始
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // 既存の接続があれば一度切断して、きれいな状態で再接続する
+    if (socket) {
+      disconnect();
+    }
+    
+    try {
+      await connect();
 
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({
-        action: 'start',
-        question: '自己紹介をお願いします。', // 将来的には動的に変更
-      }));
-      await startAudioStreaming();
-    } else {
-        // もし接続がまだなら、onopenハンドラでstartAudioStreamingを呼ぶ必要がある
-        // 今回はconnect()が同期的ではないため、接続完了を待つ必要がある
-        // より堅牢な実装は、接続状態を監視して、'connected'になったら後続処理を行うこと
-        console.log("WebSocket is not open. Waiting for connection...");
-        // ここではエラーとして扱うか、リトライロジックを入れる
-        // シンプルにするため、一度`connect`を呼んで少し待つ実装にしている
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          action: 'start',
+          question: '自己紹介をお願いします。', // 将来的には動的に変更
+        }));
+        await startAudioStreaming();
+      } else {
+        throw new Error("WebSocketの接続に失敗しました。面接を開始できません。");
+      }
+    } catch (error) {
+        console.error("WebSocketの接続に失敗しました。面接を開始できません。", error);
+        errorMessage.value = "サーバーとの接続に失敗しました。";
+        interviewState.value = 'error';
     }
   }
 
@@ -422,19 +428,24 @@ export const useInterviewStore = defineStore('interview', () => {
    * 面接セッションを停止します。
    */
   function stopInterview() {
-    if (interviewState.value !== 'in_progress') return;
+    if (!['in_progress', 'starting'].includes(interviewState.value)) return;
 
     console.log('🛑 面接セッションを終了します...');
-    interviewState.value = 'evaluating'; // 評価中に状態を変更
     isInterviewActive.value = false; // 古いフラグも更新
+
+    // 'starting' 状態では音声ストリーミングは開始されていない
+    if (interviewState.value === 'in_progress') {
+        stopAudioStreaming();
+    }
 
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'end_session' }));
       console.log('📤 セッション終了メッセージを送信しました。');
+    } else {
+       // ソケットが開いていない場合は、手動で状態を更新
+       interviewState.value = 'finished';
+       disconnect(); // リソースのクリーンアップ
     }
-    
-    isEvaluating.value = true;
-    stopAudioStreaming();
   }
 
   /**

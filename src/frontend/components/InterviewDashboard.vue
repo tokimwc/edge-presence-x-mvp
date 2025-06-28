@@ -9,34 +9,32 @@
         <!-- Left Column: Real-time Feedback -->
         <div class="bg-gray-800 rounded-lg shadow-lg p-6">
           <h2 class="text-xl font-bold mb-4">リアルタイムフィードバック</h2>
-          <RealtimeFeedback :realtime-transcription="store.realtimeTranscription" />
+          <RealtimeFeedback :realtime-transcription="store.currentTranscription" />
         </div>
 
         <!-- Right Column: STAR Evaluation -->
         <div class="bg-gray-800 rounded-lg shadow-lg p-6">
           <h2 class="text-xl font-bold mb-4">STARメソッド評価</h2>
-          <Transition name="fade">
-            <StarEvaluationCard
-              v-if="store.starEvaluation"
-              :evaluation="store.starEvaluation"
-            />
-          </Transition>
+          <STARFeedback 
+            v-if="starEvaluationForFeedbackComponent"
+            :final-evaluation="starEvaluationForFeedbackComponent" 
+          />
         </div>
       </div>
 
       <!-- Action Buttons -->
       <div class="mt-8 flex justify-center space-x-4">
         <button
-          @click="toggleRecording"
+          @click="toggleInterview"
           :disabled="isProcessing"
           :class="[
-            store.isSessionActive 
+            isInterviewInProgress 
               ? 'bg-red-500 hover:bg-red-600' 
               : 'bg-blue-500 hover:bg-blue-600',
             'text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-all transform hover:scale-105 disabled:bg-gray-400 disabled:cursor-not-allowed'
           ]"
         >
-          {{ store.isSessionActive ? '面接を終了する' : '面接を開始する' }}
+          {{ buttonText }}
         </button>
       </div>
     </div>
@@ -44,93 +42,54 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onUnmounted, computed, watch } from "vue";
+import { computed } from "vue";
 import { useInterviewStore } from "../stores/interview";
 import RealtimeFeedback from "./RealtimeFeedback.vue";
-import StarEvaluationCard from "./StarEvaluationCard.vue";
-import { MicrophoneIcon } from "@heroicons/vue/24/solid";
+import STARFeedback from "./STARFeedback.vue";
+import type { StarEvaluation } from "../stores/interview";
 
 const store = useInterviewStore();
 
-const mediaRecorder = ref<MediaRecorder | null>(null);
-const localStream = ref<MediaStream | null>(null);
-const isProcessing = ref(false);
+const isInterviewInProgress = computed(() => 
+  ['starting', 'in_progress'].includes(store.interviewState)
+);
+
+const isProcessing = computed(() => 
+  store.interviewState === 'starting' || store.interviewState === 'evaluating'
+);
 
 /**
- * @description 面接の開始・停止を切り替えます。
+ * Changes the interview state between starting and stopping.
  */
-const toggleRecording = async () => {
-  isProcessing.value = true;
-
-  if (store.isSessionActive) {
-    // --- 面接を停止 ---
-    if (mediaRecorder.value && mediaRecorder.value.state !== 'inactive') {
-      mediaRecorder.value.stop();
-    }
-    // `mediaRecorder.stop()`がトリガーするoncloseイベントで
-    // 関連リソースのクリーンアップはPiniaストア側で行われる
+const toggleInterview = async () => {
+  if (isInterviewInProgress.value) {
+    store.stopInterview();
   } else {
-    // --- 面接を開始 ---
-    try {
-      store.realtimeTranscription = '';
-      store.starEvaluation = null;
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      localStream.value = stream;
-
-      const mimeType = 'audio/webm;codecs=opus';
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        alert(`お使いのブラウザは ${mimeType} 形式に対応していません。`);
-        isProcessing.value = false;
-        return;
-      }
-      
-      mediaRecorder.value = new MediaRecorder(stream, { mimeType });
-
-      mediaRecorder.value.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          store.sendAudioChunk(event.data);
-        }
-      };
-      
-      // PiniaストアにWebSocket接続を開始させる
-      store.startInterviewSession();
-
-    } catch (err) {
-      console.error('マイクへのアクセス中にエラーが発生しました:', err);
-      alert('マイクの使用が許可されなかったか、デバイスが見つかりませんでした。');
-      isProcessing.value = false;
-    }
+    // For 'finished' or 'idle' state, start a new interview
+    await store.startInterview();
   }
 };
 
-// isSessionActive の状態を監視して後処理を行う
-watch(() => store.isSessionActive, (isActive, wasActive) => {
-  if (isActive) {
-    // セッションが開始されたら録音を開始
-    mediaRecorder.value?.start(1000); // 1秒ごとにチャンクを生成
-    isProcessing.value = false;
-  } else if (wasActive && !isActive) {
-    // セッションが終了したらストリームをクリーンアップ
-    if (localStream.value) {
-      localStream.value.getTracks().forEach(track => track.stop());
-      localStream.value = null;
-    }
-    mediaRecorder.value = null;
-    isProcessing.value = false;
-    console.log('録音セッションが正常に終了し、リソースがクリーンアップされました。');
+const buttonText = computed(() => {
+  switch (store.interviewState) {
+    case 'starting':
+      return '開始中...';
+    case 'in_progress':
+      return '面接を終了する';
+    case 'evaluating':
+      return '評価中...';
+    case 'finished':
+      return 'もう一度面接する';
+    default:
+      return '面接を開始する';
   }
 });
 
-/**
- * @description コンポーネントがアンマウントされるときにセッションをクリーンアップします。
- */
-onUnmounted(() => {
-  if (store.isSessionActive) {
-    if (mediaRecorder.value && mediaRecorder.value.state !== 'inactive') {
-      mediaRecorder.value.stop();
-    }
-  }
+const starEvaluationForFeedbackComponent = computed(() => {
+  const starEval = store.evaluations.find(e => e.type === 'STAR_EVALUATION');
+  if (!starEval) return null;
+  // STARFeedback expects an object with a star_evaluation property
+  return { star_evaluation: starEval.data as StarEvaluation };
 });
 </script>
 

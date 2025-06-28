@@ -93,15 +93,27 @@ const getRatingColor = (score: number) => {
 <style scoped>
 .star-feedback-container {
   padding: 1.5rem;
+  max-width: 1200px;
+  margin: 0 auto;
 }
 
 .evaluation-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
   gap: 1.5rem;
+  /* モバイルでは1カラム */
+  grid-template-columns: 1fr;
+}
+
+/* 幅が広い画面(1024px以上)では2カラムレイアウトを適用 */
+@media (min-width: 1024px) {
+  .evaluation-grid {
+    /* 4つの評価カード用に2x2のグリッドを作成 */
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
 .grid-title {
+  /* 親グリッドが2カラムでも、タイトルは常に全幅を占める */
   grid-column: 1 / -1;
   font-size: 1.8rem;
   font-weight: bold;
@@ -111,16 +123,25 @@ const getRatingColor = (score: number) => {
 }
 
 .summary-card {
+  /* 親グリッドが2カラムでも、サマリーは常に全幅を占める */
   grid-column: 1 / -1;
   padding: 1.5rem;
-  border-radius: 8px;
-  background-color: #2E2E2E;
+  border-radius: 12px; /* 角を少し丸く */
+  background-color: #2a2a2e; /* 少し明るめの背景色 */
+  border: 1px solid #444; /* ボーダーを追加して立体感を出す */
 }
 
 .summary-title {
   font-size: 1.2rem;
   font-weight: bold;
   margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+}
+
+.summary-title .icon {
+  margin-right: 0.75rem;
+  font-size: 1.5rem;
 }
 
 .summary-card ul {
@@ -129,6 +150,7 @@ const getRatingColor = (score: number) => {
 }
 
 .summary-card li {
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.75rem; /* 少しマージンを広げる */
+  line-height: 1.6; /* 行間を広げて読みやすくする */
 }
 </style> 
