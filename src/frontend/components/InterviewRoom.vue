@@ -189,12 +189,8 @@ onMounted(() => {
                 <STARFeedback />
               </v-window-item>
               <v-window-item value="emotion">
-                <div v-if="interviewStore.interviewState === 'in_progress'" class="pa-4">
+                <div v-if="['in_progress', 'evaluating', 'finished'].includes(interviewStore.interviewState) && interviewStore.sentimentHistory.length > 0" class="pa-4">
                     <EmotionHeatmap />
-                </div>
-                <div v-else-if="interviewStore.interviewState === 'finished' || interviewStore.interviewState === 'evaluating'" class="text-center text-medium-emphasis pa-8">
-                     <p>面接が終了しました。</p>
-                     <p>最終評価はSTAR評価タブで確認できます。</p>
                 </div>
                 <div v-else class="text-center text-medium-emphasis pa-8">
                     <p>面接を開始すると、ここに感情の分析結果がリアルタイムで表示されます。</p>

@@ -394,7 +394,8 @@ export const useInterviewStore = defineStore('interview', () => {
     errorMessage.value = null;
     transcriptions.value = [{ text: '...', is_final: false, timestamp: Date.now() }];
     evaluations.value = [];
-    // pitchHistory と sentimentHistory はクリアしない (改善要望より)
+    pitchHistory.value = [];
+    sentimentHistory.value = [];
     currentTranscription.value = '';
 
     // interviewStateの変更がUIに反映されてから処理を進める
