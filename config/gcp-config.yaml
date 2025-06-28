@@ -30,3 +30,8 @@ cloud_run:
 firestore:
   database: "(default)"
   collection_prefix: "ep_x_"
+
+# Dialogflowの設定
+dialogflow:
+  language_code: "ja"
+  location: "asia-northeast1" # Dialogflow ESエージェントを作成したリージョン (例: us-central1)

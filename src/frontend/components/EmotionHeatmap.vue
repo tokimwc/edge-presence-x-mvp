@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useInterviewStore } from '@/frontend/stores/interview'
+import { useInterviewStore } from '../stores/interview'
 import { Line } from 'vue-chartjs'
 import {
   Chart as ChartJS,

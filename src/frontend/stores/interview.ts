@@ -12,10 +12,27 @@ export interface Transcription {
 }
 
 // JSDocからTypeScriptのinterfaceに変更
-export interface Evaluation {
-  type: string;
+export interface StarEvaluationItem {
   score: number;
   feedback: string;
+}
+
+export interface StarEvaluation {
+  situation: StarEvaluationItem;
+  task: StarEvaluationItem;
+  action: StarEvaluationItem;
+  result: StarEvaluationItem;
+}
+
+export interface OverallFeedback {
+  overall_score: number;
+  strengths: string[];
+  improvement_suggestions: string[];
+}
+
+export interface Evaluation {
+  type: 'STAR_EVALUATION' | 'OVERALL_FEEDBACK' | 'LEGACY_EVALUATION';
+  data: StarEvaluation | OverallFeedback | { score: number; feedback: string; };
 }
 
 export interface PitchData {
@@ -100,6 +117,17 @@ export const useInterviewStore = defineStore('interview', () => {
   /** @type {WebSocket | null} */
   let socket: WebSocket | null = null;
 
+  const currentTranscription = ref<string>('');
+
+  // final transcriptの正規化比較用関数を追加
+  function normalizeText(text: string): string {
+    return text
+      .replace(/[\s　]+/g, '') // 全角・半角スペースを除去
+      .replace(/[。、,.]/g, '') // 句読点を除去
+      .replace(/\r?\n/g, '') // 改行を除去
+      .toLowerCase();
+  }
+
   /**
    * バックエンドから受信したメッセージを処理するハンドラ
    * @param {any} message
@@ -137,40 +165,51 @@ export const useInterviewStore = defineStore('interview', () => {
         }
         transcriptions.value.push({ text: '...', is_final: false, timestamp: Date.now() });
         break;
+      case 'transcript_update': {
+        const { transcript } = message.payload;
+        currentTranscription.value = transcript;
+        break;
+      }
+      case 'sentiment_update': {
+        const { sentiment } = message.payload;
+        if (sentiment && Object.keys(sentiment).length > 0) {
+          sentimentHistory.value.push(sentiment);
+        }
+        break;
+      }
       case 'evaluation_started':
         isEvaluating.value = true;
         interviewState.value = 'evaluating';
         console.log('⌛ AIによる評価が開始されました...');
         break;
       case 'final_evaluation':
-        // このイベントはgemini_feedbackに統合されつつあるが、後方互換性のために残す
-        // feedbackがオブジェクトの場合があるので、raw_evaluationを優先的に使う
         isEvaluating.value = false;
         interviewState.value = 'finished';
-        const rawEval = message.payload.evaluation?.raw_evaluation || JSON.stringify(message.payload.evaluation);
-        evaluations.value.push({
-            type: '総合評価 (Gemini)',
-            score: message.payload.evaluation?.score || 0,
-            feedback: rawEval,
-        });
-        console.log('👑 AIによる最終評価を受信しました！(final_evaluation)');
-        break;
-      case 'gemini_feedback':
-        isEvaluating.value = false;
-        interviewState.value = 'finished';
-        // 既存の評価があれば更新、なければ追加
-        const existingEvalIndex = evaluations.value.findIndex(e => e.type === '総合評価 (Gemini)');
-        const newEval = {
-          type: '総合評価 (Gemini)',
-          score: message.payload.score || 0,
-          feedback: message.payload.raw_evaluation,
-        };
-        if (existingEvalIndex > -1) {
-          evaluations.value[existingEvalIndex] = newEval;
-        } else {
-          evaluations.value.push(newEval);
+        // バックエンドから直接評価オブジェクトがpayloadとして送られてくる
+        const newEvaluationData = message.payload;
+        
+        // 既存の評価をクリアして、新しい評価で完全に置き換える
+        evaluations.value = [];
+        
+        if (newEvaluationData.star_evaluation) {
+          evaluations.value.push({
+            type: 'STAR_EVALUATION',
+            data: newEvaluationData.star_evaluation,
+          });
         }
-        console.log('👑 AIによる構造化フィードバックを受信しました！(gemini_feedback)');
+        
+        if (newEvaluationData.overall_score !== undefined) {
+           evaluations.value.push({
+            type: 'OVERALL_FEEDBACK',
+            data: {
+              overall_score: newEvaluationData.overall_score,
+              strengths: newEvaluationData.strengths,
+              improvement_suggestions: newEvaluationData.improvement_suggestions,
+            }
+          });
+        }
+
+        console.log('👑 AIによる最終評価を受信しました！', evaluations.value);
         break;
       case 'pitch_analysis':
         const newPitchData: PitchData = {
@@ -356,6 +395,7 @@ export const useInterviewStore = defineStore('interview', () => {
     evaluations.value = [];
     pitchHistory.value = [];
     sentimentHistory.value = [];
+    currentTranscription.value = '';
 
     connect();
 
@@ -411,6 +451,7 @@ export const useInterviewStore = defineStore('interview', () => {
     pitchHistory.value = [];
     sentimentHistory.value = [];
     interviewState.value = 'idle';
+    currentTranscription.value = '';
   }
 
   return {
@@ -425,6 +466,7 @@ export const useInterviewStore = defineStore('interview', () => {
     audioStream, // for visualizer
     localStream,
     interviewState,
+    currentTranscription,
 
     connect,
     disconnect,

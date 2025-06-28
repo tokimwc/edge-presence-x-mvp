@@ -1,32 +1,22 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useInterviewStore } from '@/frontend/stores/interview'
+import { useInterviewStore, type StarEvaluation, type OverallFeedback } from '@/frontend/stores/interview'
 import StarEvaluationCard from './StarEvaluationCard.vue'
-import { marked } from 'marked'
 
 const interviewStore = useInterviewStore()
 
-const geminiEvaluation = computed(() => {
-  const geminiEval = interviewStore.evaluations.find(
-    (e) => e.type === '総合評価 (Gemini)'
+const starEvaluation = computed(() => {
+  const evalData = interviewStore.evaluations.find(
+    (e) => e.type === 'STAR_EVALUATION'
   )
-  if (!geminiEval || !geminiEval.feedback) {
-    return null
-  }
-  // `feedback`は常に文字列として扱う
-  return {
-    ...geminiEval,
-    // この時点でパースは不要。raw_evaluationをmarkedでHTMLに変換して表示する
-    raw_evaluation: geminiEval.feedback,
-  }
+  return evalData ? (evalData.data as StarEvaluation) : null
 })
 
-const formattedFeedback = computed(() => {
-  if (geminiEvaluation.value?.raw_evaluation) {
-    // `raw_evaluation` (string) をHTMLに変換
-    return marked.parse(geminiEvaluation.value.raw_evaluation)
-  }
-  return '<p>フィードバックの解析に失敗しました。</p>'
+const overallFeedback = computed(() => {
+  const evalData = interviewStore.evaluations.find(
+    (e) => e.type === 'OVERALL_FEEDBACK'
+  )
+  return evalData ? (evalData.data as OverallFeedback) : null
 })
 
 const isLoading = computed(() => interviewStore.isEvaluating)
@@ -41,26 +31,59 @@ const getRatingColor = (score: number) => {
 </script>
 
 <template>
-  <div class="star-feedback">
+  <div class="star-feedback-container">
     <div v-if="isLoading" class="text-center">
-      <v-progress-circular indeterminate color="primary"></v-progress-circular>
-      <p class="mt-2 text-medium-emphasis">AIが評価を生成中です...</p>
+      <v-progress-circular indeterminate color="primary" size="64"></v-progress-circular>
+      <p class="mt-4 text-lg text-medium-emphasis">AIが評価を生成中です...</p>
     </div>
-    <div v-else-if="geminiEvaluation">
+    
+    <div v-else-if="starEvaluation && overallFeedback" class="evaluation-grid">
+      <h2 class="grid-title">STARメソッド評価 (総合スコア: {{ overallFeedback.overall_score }}/40)</h2>
+      
       <StarEvaluationCard
-        :score="geminiEvaluation.score"
-        title="STARメソッド評価"
-      >
-        <template #feedback>
-          <!-- v-htmlを使ってMarkdownをレンダリング -->
-          <div
-            class="prose prose-sm max-w-none"
-            v-html="formattedFeedback"
-          ></div>
-        </template>
-      </StarEvaluationCard>
+        title="Situation (状況)"
+        :score="starEvaluation.situation.score"
+        :feedback="starEvaluation.situation.feedback"
+      />
+      <StarEvaluationCard
+        title="Task (課題)"
+        :score="starEvaluation.task.score"
+        :feedback="starEvaluation.task.feedback"
+      />
+      <StarEvaluationCard
+        title="Action (行動)"
+        :score="starEvaluation.action.score"
+        :feedback="starEvaluation.action.feedback"
+      />
+      <StarEvaluationCard
+        title="Result (結果)"
+        :score="starEvaluation.result.score"
+        :feedback="starEvaluation.result.feedback"
+      />
+
+      <div class="summary-card strengths">
+        <h3 class="summary-title">👍 よかった点 (Strengths)</h3>
+        <ul>
+          <li v-for="(item, index) in overallFeedback.strengths" :key="index">
+            {{ item }}
+          </li>
+        </ul>
+        <p v-if="!overallFeedback.strengths || overallFeedback.strengths.length === 0">
+          今回は特にありませんでした。
+        </p>
+      </div>
+
+      <div class="summary-card improvements">
+        <h3 class="summary-title">🚀 改善点 (Suggestions)</h3>
+        <ul>
+          <li v-for="(item, index) in overallFeedback.improvement_suggestions" :key="index">
+            {{ item }}
+          </li>
+        </ul>
+      </div>
     </div>
-    <div v-else class="text-center text-medium-emphasis">
+
+    <div v-else class="text-center text-medium-emphasis mt-10">
       <p>まだ評価はありません。</p>
       <p>面接を終了すると、ここにAIからのフィードバックが表示されます。</p>
     </div>
@@ -68,22 +91,44 @@ const getRatingColor = (score: number) => {
 </template>
 
 <style scoped>
-/* Tailwind CSSの@applyを使って、proseのスタイルを微調整 */
-.prose {
-  @apply text-white;
+.star-feedback-container {
+  padding: 1.5rem;
 }
-.prose h1,
-.prose h2,
-.prose h3 {
-  @apply text-white font-bold;
+
+.evaluation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1.5rem;
 }
-.prose strong {
-  @apply text-white;
+
+.grid-title {
+  grid-column: 1 / -1;
+  font-size: 1.8rem;
+  font-weight: bold;
+  margin-bottom: 1rem;
+  color: #FFFFFF;
+  text-align: center;
 }
-.prose blockquote {
-  @apply border-l-4 border-gray-500 pl-4 text-gray-300;
+
+.summary-card {
+  grid-column: 1 / -1;
+  padding: 1.5rem;
+  border-radius: 8px;
+  background-color: #2E2E2E;
 }
-.prose ul > li::before {
-  @apply bg-gray-400;
+
+.summary-title {
+  font-size: 1.2rem;
+  font-weight: bold;
+  margin-bottom: 1rem;
+}
+
+.summary-card ul {
+  padding-left: 1.5rem;
+  list-style-type: disc;
+}
+
+.summary-card li {
+  margin-bottom: 0.5rem;
 }
 </style> 

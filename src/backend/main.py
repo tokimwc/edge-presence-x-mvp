@@ -1,8 +1,37 @@
+import sys
+import os
+
+# --- 🚀 Pythonのモジュール検索パスを最初に設定する最強のおまじない 🚀 ---
+# このファイル(main.py)の場所を基準に、'src'ディレクトリの絶対パスを計算する！
+# .../src/backend/main.py -> .../src/backend -> .../src
+_SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# Pythonがモジュールを探す場所リストの先頭に'src'を追加！
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+# --- ここまでがおまじない！ ---
+
 import asyncio
 import json
 import logging
-import os
-import sys
+from dotenv import load_dotenv
+
+# ------------------------------------------------------------------------------
+# パスの設定と環境変数の読み込み
+# ------------------------------------------------------------------------------
+# main.pyがどこから実行されてもいいように、プロジェクトのルートパスを取得してる
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Pythonがモジュールを探すパスに、プロジェクトルートを追加！
+sys.path.append(ROOT_DIR)
+
+# .envファイルを光の速さで読み込む！
+# uvicornのリロード時とかでも、これが一番最初に実行されるから安心なんだ。
+load_dotenv(os.path.join(ROOT_DIR, '.env'))
+
+# Windowsでasyncioを使うときのおまじない。
+# "RuntimeError: Event loop is closed"みたいなエラーを防いでくれる。
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# ------------------------------------------------------------------------------
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,11 +41,7 @@ import uvicorn
 
 # --- パス設定 ---
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
-_SRC_DIR = os.path.join(_BACKEND_DIR, '..')
 _PROJECT_ROOT = os.path.join(_SRC_DIR, '..')
-
-if _SRC_DIR not in sys.path:
-    sys.path.insert(0, _SRC_DIR)
 
 from backend.services.speech_processor import SpeechProcessor
 
@@ -60,18 +85,24 @@ async def root():
 async def websocket_handler(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket接続がきたよ！クライアントとご対面〜！")
-    speech_processor = SpeechProcessor()
 
     async def send_to_client(message: dict):
         try:
             await websocket.send_json(message)
-            logger.info(f"📤 クライアントへのメッセージ送信完了: type={message.get('type')}")
+            logger.debug(f"📤 クライアントへのメッセージ送信完了: type={message.get('type')}")
         except WebSocketDisconnect:
-            logger.warning("❗️ クライアントへの送信中にWebSocketが切断されました。")
+            logger.warning("❗️ クライアントが切断したため、メッセージは送信しませんでした。")
+        except RuntimeError as e:
+            # 「接続切れてるよ！」エラーをキャッチして、クラッシュを防ぐ
+            if "after sending 'websocket.close'" in str(e):
+                logger.warning(f"👻 クライアント接続が閉じた後に送信しようとしました: {e}")
+            else:
+                logger.error(f"💣 WebSocket送信中に予期せぬRuntimeError: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"💣 クライアントへのメッセージ送信中に予期せぬエラー: {e}", exc_info=True)
     
-    speech_processor.set_send_to_client_callback(send_to_client)
+    # send_to_clientを定義した後に、SpeechProcessorをインスタンス化する
+    speech_processor = SpeechProcessor(websocket=websocket, send_to_client=send_to_client)
 
     try:
         while True:
@@ -128,12 +159,16 @@ else:
 # --- サーバー起動 ---
 def main():
     """ サーバーを起動するメイン関数 """
-    logger.info("🚀 サーバー起動！ http://localhost:8000 で待ってるよん！")
+    # Cloud RunがPORT環境変数を設定するため、それに従う
+    # ローカルで実行する場合は、デフォルトで8000番ポートを使用
+    port = int(os.getenv("PORT", 8000))
+
+    logger.info(f"🚀 サーバー起動！ http://localhost:{port} で待ってるよん！")
     uvicorn.run(
-        "main:app", 
-        host="0.0.0.0", 
-        port=8000, 
-        reload=False,
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=True,  # ローカル開発用にホットリロードを有効にする
         log_level="info"
     )
 

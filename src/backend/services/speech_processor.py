@@ -10,6 +10,9 @@ import threading
 from google.cloud import pubsub_v1 # ◀️ Pub/Subライブラリをインポート！
 import json
 import uuid # ◀️ セッションID生成のために追加！
+from fastapi import WebSocket
+from starlette.websockets import WebSocketDisconnect
+from datetime import datetime
 
 # --- Pythonのモジュール検索パスにsrcディレクトリを追加 ---
 import sys
@@ -25,6 +28,7 @@ if _SRC_DIR not in sys.path:
 from backend.services import gemini_service # gemini_serviceモジュールとしてインポート！
 from backend.workers.pitch_worker import PitchWorker
 from backend.services import dialogflow_service # ◀️ sentiment_worker の代わりに dialogflow_service をインポート！
+from backend.services.gemini_service import GeminiService
 # 新しく作った共通設定ファイルをインポート！
 from backend.shared_config import RATE, CHUNK, CHANNELS, FORMAT, SAMPLE_WIDTH
 
@@ -52,7 +56,11 @@ class SpeechProcessor:
     文字起こし、音程解析、感情分析、Gemini評価をまとめてやるぞ！
     """
 
-    def __init__(self):
+    def __init__(self, websocket: WebSocket, send_to_client: callable):
+        self.websocket = websocket
+        self.send_to_client = send_to_client
+        self.session_id = str(uuid.uuid4())
+        self.gemini_service = GeminiService() # GeminiServiceを初期化
         self.speech_client = speech.SpeechAsyncClient()
         self._audio_queue = asyncio.Queue()
         self._is_running = False
@@ -62,8 +70,6 @@ class SpeechProcessor:
         self.main_loop = asyncio.get_event_loop()
         self.pyaudio_instance = None
         self.microphone_stream = None
-        self.send_to_client_callback = None # 送信コールバック関数
-        self.session_id = str(uuid.uuid4()) # ◀️ 各セッションでユニークなIDを生成！
 
         # --- Pub/Sub Publisherの初期化 ---
         try:
@@ -92,8 +98,8 @@ class SpeechProcessor:
         logger.info(f"PyAudio設定: FORMAT={FORMAT}, CHANNELS={CHANNELS}, RATE={RATE}, CHUNK={CHUNK}, SAMPLE_WIDTH={SAMPLE_WIDTH}")
 
         # --- Gemini評価システム関連の初期化 ---
-        # gemini_service モジュールのインポート時に初期化が走るから、ここではインスタンスの有無をチェックするだけ！
-        self.gemini_enabled = gemini_service.gemini_model_instance is not None
+        # __init__で生成したGeminiServiceインスタンスのプロパティをチェックする
+        self.gemini_enabled = self.gemini_service.gemini_model_instance is not None
         if self.gemini_enabled:
             logger.info("👑 Gemini評価システムが有効になりました。")
         else:
@@ -116,6 +122,21 @@ class SpeechProcessor:
             self._required_pitch_bytes = self.pitch_worker.max_lag * self.pitch_worker.sample_width * 2
             logger.info(f"ピッチ解析に必要な最小バイト数: {self._required_pitch_bytes}")
         # --- ここまでセッションデータ変数 ---
+
+    def _reset_session_data(self):
+        """
+        セッションに関連するデータをリセットする内部ヘルパー関数。
+        start_transcription_and_evaluation が呼ばれたときに実行する。
+        """
+        self.session_id = str(uuid.uuid4())
+        self._audio_queue = asyncio.Queue()
+        self._stop_event.clear()
+        self.full_transcript = ""
+        self.pitch_values = []
+        self._pitch_buffer = b""
+        self.last_pitch_analysis_summary = {}
+        self.last_emotion_analysis_summary = {}
+        logger.info(f"新しいセッションIDでデータをリセットしました: {self.session_id}")
 
     async def process_audio_chunk(self, chunk: bytes):
         """
@@ -179,15 +200,11 @@ class SpeechProcessor:
                 self.pyaudio_instance = None # 失敗したらNoneに戻す
         return self.pyaudio_instance
 
-    def set_send_to_client_callback(self, callback):
-        """フロントエンドにデータを送るための非同期コールバック関数をセットするよ"""
-        self.send_to_client_callback = callback
-
     async def _send_to_client(self, data_type, payload):
-        """コールバック経由でクライアントにJSONデータを送信する"""
-        if self.send_to_client_callback:
+        """インスタンス化時に渡されたsend_to_client関数経由でクライアントにJSONデータを送信する"""
+        if self.send_to_client:
             message = {"type": data_type, "payload": payload}
-            await self.send_to_client_callback(message)
+            await self.send_to_client(message)
 
     def _get_speech_client(self):
         # ... existing code ...
@@ -225,133 +242,120 @@ class SpeechProcessor:
         """
         音声ストリームを処理して、文字起こしと各種分析を実行するメインループだよん。
         """
-        try:
-            # --- 1. 音声ストリームの生成 ---
-            audio_stream_generator = self._audio_stream_generator()
+        # --- 1. 音声ストリームの生成 ---
+        audio_stream_generator = self._audio_stream_generator()
 
-            # --- 2. Google Cloud Speech-to-Text APIへのリクエスト設定 ---
-            # ...（中略）...
-            recognition_config = speech.RecognitionConfig(
-                encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-                sample_rate_hertz=RATE,
-                language_code="ja-JP",
-                enable_automatic_punctuation=True,
-                profanity_filter=True, # 不適切な単語をフィルタリング
-            )
-            streaming_config = speech.StreamingRecognitionConfig(
-                config=recognition_config,
-                interim_results=True, # 暫定的な結果も受け取る
-            )
-
-            # --- 3. ストリーミングリクエストの作成と実行 ---
-            requests = (
-                speech.StreamingRecognizeRequest(audio_content=chunk)
-                for chunk in audio_stream_generator
-            )
-
-            logger.info("🚀 Google Speech-to-Text APIへのストリーミングを開始します...")
-            # recognizeメソッドは非同期イテレータを返す！
-            stream = await self.speech_client.streaming_recognize(
-                requests=requests,
-                config=streaming_config,
-            )
-
-            # --- 4. レスポンスの処理 ---
-            async for response in stream:
-                if not self._is_running:
-                    break
-
-                if not response.results:
-                    continue
-
-                result = response.results[0]
-                if not result.alternatives:
-                    continue
-                
-                transcript = result.alternatives[0].transcript
-                timestamp = time.time()
-
-                if result.is_final:
-                    logger.info(f"✅ 最終的な文字起こし結果: '{transcript}'")
-                    self.full_transcript += transcript + " "
-                    
-                    # --- 🔽 ここからが新しい処理！ 🔽 ---
-                    # 1. 最終結果をPub/Subに送信（これはもともとあった処理）
-                    pubsub_message = {
-                        "text": transcript,
-                        "timestamp": timestamp,
-                        "session_id": self.session_id
-                    }
-                    await self._publish_to_pubsub(pubsub_message)
-
-                    # 2. Dialogflowで感情分析を実行！
-                    logger.info(f"🤖 Dialogflowに感情分析をリクエスト: '{transcript}'")
-                    sentiment_result = dialogflow_service.analyze_sentiment(
-                        session_id=self.session_id,
-                        text=transcript
-                    )
-                    
-                    if sentiment_result:
-                        logger.info(f"😊 Dialogflowからの感情分析結果: {sentiment_result}")
-                        # フロントエンドに送信
-                        await self._send_to_client("sentiment_analysis", sentiment_result)
-                        # 最終評価用に保存
-                        self.last_emotion_analysis_summary = {
-                            "score": sentiment_result.get("score"),
-                            "magnitude": sentiment_result.get("magnitude")
-                        }
-                    else:
-                        logger.warning("😢 Dialogflowでの感情分析に失敗しました。")
-                    # --- 🔼 ここまでが新しい処理！ 🔼 ---
-
-                else:
-                    # 暫定的な結果をクライアントに送信
-                    await self._send_to_client(
-                        "interim_transcript",
-                        {"text": transcript, "timestamp": timestamp}
-                    )
-
-        except exceptions.Cancelled as e:
-            logger.warning("ストリーミングがキャンセルされました。これは正常な停止処理の一部である可能性があります。")
-        except exceptions.OutOfRange as e:
-            logger.error(f"😱 音声ストリームの終端に達しました: {e}")
-        except exceptions.GoogleAPICallError as e:
-            logger.error(f"😱 Google Speech APIの呼び出しでエラー: {e}")
-        except Exception as e:
-            logger.exception("😱 _process_speech_streamで予期せぬエラーが発生しました。")
-        finally:
-            logger.info("👋 _process_speech_stream ループが終了しました。")
-            self._stop_event.set()
-
-    async def _audio_stream_generator(self):
-        """
-        _audio_queueから音声チャンクを取り出して、Google APIに送れる形式でyieldする非同期ジェネレータ。
-        """
-        # 1. 最初にストリーミング設定を送信
+        # --- 2. Google Cloud Speech-to-Text APIへのリクエスト設定 ---
+        # ...（中略）...
         recognition_config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=RATE,
             language_code="ja-JP",
             enable_automatic_punctuation=True,
-            # モデル選択: 'telephony'か'medical_conversation'などが用途に合わせて選べる
-            # 'default' もあるけど、今回は汎用的な 'latest_long' を試してみる
-            model="latest_long", 
-            use_enhanced=True, # 高度な音声認識モデルを有効化
+            profanity_filter=True, # 不適切な単語をフィルタリング
         )
         streaming_config = speech.StreamingRecognitionConfig(
             config=recognition_config,
-            interim_results=True,  # 途中結果を取得する
-            single_utterance=False # 複数回の発話を認識
+            interim_results=True, # 暫定的な結果も受け取る
+        )
+
+        requests = self._create_streaming_requests(audio_stream_generator)
+
+        try:
+            logger.info("🚀 Google Speech-to-Text APIへのストリーミングを開始します...")
+            # recognizeメソッドは非同期イテレータを返す！
+            # 修正点: streaming_recognizeはコルーチンなのでawaitする
+            stream = await self.speech_client.streaming_recognize(
+                requests=requests
+            )
+
+            # ストリーミングのレスポンスを非同期で処理
+            async for response in stream:
+                if not self._is_running:
+                    break
+                
+                if response.results:
+                    result = response.results[0]
+                    if result.alternatives:
+                        transcript_chunk = result.alternatives[0].transcript
+
+                        # 確定した文字起こしは全文に結合
+                        if result.is_final:
+                            self.full_transcript += transcript_chunk + " "
+                            logger.info(f"✅ 最終的な文字起こし結果の断片: '{transcript_chunk}' (結合後の全文: '{self.full_transcript[:50]}...')")
+
+                            # 感情分析は確定した断片ごとに行う
+                            if len(transcript_chunk.strip()) > 1: # 1文字以上なら
+                                try:
+                                    logger.info(f"🤖 Dialogflowに感情分析をリクエスト: '{transcript_chunk}'")
+                                    sentiment_result = await dialogflow_service.analyze_sentiment(
+                                        session_id=self.session_id, text=transcript_chunk
+                                    )
+                                    # WebSocketクライアントに感情分析結果を送信
+                                    if sentiment_result:
+                                        await self._send_to_client("sentiment_update", {
+                                            "sentiment": sentiment_result,
+                                            "timestamp": datetime.now().isoformat()
+                                        })
+                                except Exception as e:
+                                    logger.error(f"感情分析の呼び出しでエラーが発生しましたが、処理を続行します: {e}")
+
+                        # interimもfinalも、常に更新された全文をフロントに送る！
+                        # これでフロントは表示を更新するだけでよくなる
+                        current_display_transcript = self.full_transcript + transcript_chunk if not result.is_final else self.full_transcript
+
+                        realtime_data = {
+                            "transcript": current_display_transcript,
+                            "is_final": result.is_final
+                        }
+                        await self._send_to_client("transcript_update", realtime_data)
+
+        except WebSocketDisconnect:
+            logger.warning("🎤 音声ストリームの途中でクライアントが切断したっぽ！処理を終了するね〜👋")
+        except exceptions.Cancelled as e:
+            logger.warning("ストリーミングがキャンセルされました。これは正常な停止処理の一部である可能性があります。")
+        except exceptions.OutOfRange as e:
+            logger.error(f"😱 音声ストリームの終端に達しました: {e}")
+        except exceptions.GoogleAPICallError as e:
+            logger.error(f"😱 Google Speech-to-Text APIでエラー: {e}")
+        except Exception as e:
+            logger.exception(f"😱 _process_speech_streamで予期せぬエラーが発生しました。")
+        finally:
+            logger.info("👋 _process_speech_stream ループが終了しました。")
+            self._stop_event.set()
+
+    async def _create_streaming_requests(self, audio_generator):
+        """
+        Google Speech-to-Text APIに送信するリクエストのジェネレータだよん。
+        最初に設定情報を送って、そのあとはひたすら音声データを送る！
+        """
+        # 最初にストリーミング設定を送信
+        recognition_config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=RATE,
+            language_code="ja-JP",
+            enable_automatic_punctuation=True,
+            profanity_filter=True,
+        )
+        streaming_config = speech.StreamingRecognitionConfig(
+            config=recognition_config,
+            interim_results=True,
         )
         yield speech.StreamingRecognizeRequest(streaming_config=streaming_config)
-        logger.info("🎤 ストリーミング設定送信完了！音声待機中...")
 
-        # 2. キューから音声データを読み取って送信
+        # その後は音声データを非同期でストリーミング
+        async for chunk in audio_generator:
+            if not chunk:
+                break
+            yield speech.StreamingRecognizeRequest(audio_content=chunk)
+
+    async def _audio_stream_generator(self):
+        """キューから音声データを読み出して、ジェネレータとして返す非同期関数"""
         while self._is_running and not self._stop_event.is_set():
             try:
                 # タイムアウト付きでキューからデータを取得
                 chunk = await asyncio.wait_for(self._audio_queue.get(), timeout=0.1)
-                yield speech.StreamingRecognizeRequest(audio_content=chunk)
+                yield chunk
             except asyncio.TimeoutError:
                 # タイムアウトはエラーじゃない。データが来てないだけだからループを続ける
                 continue
@@ -415,26 +419,21 @@ class SpeechProcessor:
 
     async def start_transcription_and_evaluation(self):
         """
-        WebSocketからの音声ストリームを受け付けるためのセッションを開始するよん！
+        文字起こしと評価のセッションを開始するメインの関数だよん！
         """
         if self._is_running:
-            logger.warning("🖥️ すでにセッションが実行中です。")
+            logger.warning("セッションはすでに実行中です。")
             return
 
         logger.info("🚀 WebSocketからのリアルタイムセッションを開始します...")
         self._is_running = True
-        self._stop_event.clear()
+        self._reset_session_data() # ◀️ セッション開始時にデータをリセット！
         
-        # --- セッションデータをリセット ---
-        self.full_transcript = ""
-        self.pitch_values = []
-        self._pitch_buffer = b"" # ピッチ解析バッファもリセット
-        self.last_pitch_analysis_summary = {}
-        self.last_emotion_analysis_summary = {}
-        # --- ここまで ---
-
-        self._processing_task = asyncio.create_task(self._process_speech_stream())
-        logger.info("🔥 メイン処理ループを開始しました。")
+        # _process_speech_stream を非同期タスクとして実行
+        self._processing_task = self.main_loop.create_task(self._process_speech_stream())
+        
+        # 関連するワーカーを起動
+        await self._start_workers()
 
     async def start_realtime_transcription_from_mic(self):
         """
@@ -510,62 +509,73 @@ class SpeechProcessor:
 
         try:
             # 6. 最終評価の実行
-            final_evaluation = await self._run_final_evaluation()
+            final_evaluation_result = await self._run_final_evaluation()
             
             # 7. 最終評価をクライアントに送信
-            logger.info("👑 最終評価が完了しました！")
-            # logger.debug(f"最終評価ペイロード: {final_evaluation}")
-            await self._send_to_client("final_evaluation", {"evaluation": final_evaluation})
-            
-            # Geminiからの構造化されたフィードバックも送信
-            if self.gemini_enabled and isinstance(final_evaluation, dict):
-                 # `final_evaluation` が辞書であり、期待するキーを持つか確認
-                if "raw_evaluation" in final_evaluation and "score" in final_evaluation:
-                    await self._send_to_client("gemini_feedback", final_evaluation)
-                else:
-                    # 互換性のためのフォールバック
-                    await self._send_to_client("gemini_feedback", {
-                        "raw_evaluation": str(final_evaluation),
-                        "score": 50 # デフォルトスコア
-                    })
+            if final_evaluation_result and "error" not in final_evaluation_result:
+                logger.info("👑 最終評価が完了しました！クライアントに送信します。")
+                await self._send_to_client("final_evaluation", final_evaluation_result)
+            else:
+                logger.error("最終評価に失敗したか、エラーが含まれています。")
+                error_message = final_evaluation_result.get("error", "最終評価の生成中に不明なエラーが発生しました。") if isinstance(final_evaluation_result, dict) else "最終評価の生成中に不明なエラーが発生しました。"
+                await self._send_to_client("error", {"message": error_message})
 
         except Exception as e:
-            logger.error(f"😱 最終評価の生成中にエラーが発生しました: {e}", exc_info=True)
-            await self._send_to_client("error", {"message": "最終評価の生成中にエラーが発生しました。"})
+            logger.error(f"😱 最終評価の生成・送信プロセス全体でエラーが発生しました: {e}", exc_info=True)
+            await self._send_to_client("error", {"message": "最終評価の生成中にクリティカルなエラーが発生しました。"})
         
         logger.info("✅ セッションが正常に終了しました。")
 
 
-    async def _run_final_evaluation(self) -> dict | str:
+    async def _run_final_evaluation(self) -> dict:
         """
         セッション終了後に、収集したデータを使ってGeminiに最終評価をリクエストするよ！
         """
         logger.info("🧠 Geminiによる最終評価を準備中...")
-        
-        # 収集したデータをサマリー
-        self.last_pitch_analysis_summary = self._summarize_pitch_data()
 
-        # Geminiに渡すためのコンテキストを作成
+        if not self.gemini_enabled:
+            logger.warning("Gemini評価が無効になっているため、評価をスキップします。")
+            return {"error": "Gemini evaluation is disabled."}
+
+        # 1. ピッチデータの集計
+        pitch_summary = self._summarize_pitch_data()
+        
+        # TODO: 感情分析データの集計ロジックを実装する
+        logger.warning("セッション中の感情分析データは現在集計されていません。最終評価ではダミー値を使用します。")
+        emotion_summary = {
+            "dominant_emotion": "分析中",
+            "emotion_score": "N/A"
+        }
+
+        # 2. Geminiに渡すための評価コンテキストを作成
         evaluation_context = {
-            "question": self.current_interview_question,
-            "full_transcript": self.full_transcript,
-            "pitch_analysis": self.last_pitch_analysis_summary,
-            "emotion_analysis": self.last_emotion_analysis_summary
+            "interview_question": self.current_interview_question,
+            "transcript": self.full_transcript,
+            "average_pitch": pitch_summary.get("average_pitch", "N/A"),
+            "pitch_variation": pitch_summary.get("pitch_variation", "N/A"),
+            "dominant_emotion": emotion_summary.get("dominant_emotion", "N/A"),
+            "emotion_score": emotion_summary.get("emotion_score", "N/A"),
         }
         
-        if self.gemini_enabled:
-            try:
-                # gemini_service モジュールの関数を呼び出す
-                response_data = await gemini_service.generate_structured_feedback(evaluation_context)
-                logger.info("💎 Geminiから評価を取得しました！")
-                # response_data は既に辞書のはず
-                return response_data
-            except Exception as e:
-                logger.error(f"😱 Geminiへのリクエスト中にエラー: {e}", exc_info=True)
-                return f"Gemini評価中にエラーが発生しました: {e}"
+        logger.info("Geminiに渡す評価コンテキストを作成しました。")
+        
+        # 3. Geminiサービスを呼び出し
+        try:
+            gemini_eval = await self.gemini_service.generate_structured_feedback(
+                evaluation_context=evaluation_context
+            )
+        except Exception as e:
+            logger.error(f"Geminiサービス呼び出し中に予期せぬエラーが発生: {e}", exc_info=True)
+            return {"error": "An unexpected error occurred while calling the Gemini service."}
+        
+        # 4. 結果を処理して返す
+        if gemini_eval and "error" not in gemini_eval:
+            logger.info("💎 Geminiから構造化された評価を取得しました！")
+            return gemini_eval
         else:
-            logger.warning("😢 Geminiが無効なため、最終評価をスキップします。")
-            return "Gemini評価は現在無効です。"
+            error_msg = gemini_eval.get('error') if gemini_eval else 'No response from Gemini'
+            logger.error(f"⛑️ Geminiからの評価取得に失敗しました: {error_msg}")
+            return {"error": f"Failed to get evaluation from Gemini: {error_msg}"}
 
 
     def _summarize_pitch_data(self):

@@ -1,14 +1,100 @@
 import os
 import json
 import logging
+import re
 import vertexai
-from vertexai.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold
+from vertexai.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold, Part
 from deepeval.metrics import GEval
-from deepeval.test_case import LLMTestCase
+from deepeval.test_case import LLMTestCase, LLMTestCaseParams
+from deepeval.models.base_model import DeepEvalBaseLLM
 import asyncio
+from tenacity import retry, stop_after_attempt, wait_random_exponential
+from google.api_core import exceptions as google_exceptions
 
 # ロガー設定
 logger = logging.getLogger(__name__)
+
+# --- deepeval用のVertexAIラッパークラス ---
+class VertexAI(DeepEvalBaseLLM):
+    """
+    deepevalでVertex AI Geminiモデルを使うためのラッパークラスだよ。
+    DeepEvalBaseLLMを継承して、非同期処理とか必要なメソッドを実装してる。
+    """
+
+    def __init__(self, project: str, location: str, model_name: str = "gemini-1.5-pro-001"):
+        """
+        コンストラクタ。引数をちゃんと受け取れるようにしたよ！
+        モデルの初期化はload_modelでやるのがお作法だから、ここでは保持するだけ。
+        """
+        self.project = project
+        self.location = location
+        self.model_name = model_name
+        # modelインスタンスはload_modelで初期化するから、ここではNoneでOK！
+        self.model = None
+
+    def load_model(self):
+        """
+        ‼️‼️【重要】ここが追加したメソッド！‼️‼️
+        DeepEvalBaseLLMのお作法に従って、load_modelを実装するよ。
+        ここでVertex AIの初期化とモデルのロードを行うのがイケてるやり方！
+        """
+        if self.model is None:
+            try:
+                # GCPプロジェクトの初期化（複数回呼ばれても大丈夫なように）
+                vertexai.init(project=self.project, location=self.location)
+                # 使用する生成モデルを指定してインスタンス化
+                self.model = GenerativeModel(self.model_name)
+                logger.info(f"✅ VertexAIラッパー内でGeminiモデル ({self.model_name}) のロード完了！")
+            except Exception as e:
+                logger.error(f"😱 VertexAIラッパーのload_modelでエラー発生: {e}")
+                # エラーが発生したらNoneのままにして、後続処理で判定できるようにする
+                self.model = None
+        return self.model
+
+    def generate(self, prompt: str) -> str:
+        """
+        同期処理でプロンプトからテキストを生成するよ。
+        DeepEvalBaseLLMの抽象メソッドだから実装が必須！
+        今回はa_generateを使うから、ここはシンプルにNotImplementedErrorを発生させる。
+        """
+        raise NotImplementedError("This model is designed for asynchronous generation.")
+
+    async def a_generate(self, prompt: str) -> str:
+        """
+        非同期処理でプロンプトからテキストを生成するメソッド。
+        generate_content_asyncを使って、I/Oバウンドな処理をブロックしないようにしてる。
+        """
+        # モデルがロードされてるかチェック！されてなかったらロードする
+        if self.model is None:
+            self.load_model()
+        
+        # それでもダメなら、エラーメッセージを返す
+        if self.model is None:
+            return "Error: Model could not be loaded."
+
+        logger.debug(f"VertexAI a_generateに渡されたプロンプト: {prompt[:100]}...") # 長いプロンプトを考慮
+        try:
+            # GeminiのGenerationConfigとSafetySettingsを取得
+            generation_config = gemini_config.get("generation_config", {})
+            safety_settings = gemini_config.get("safety_settings", {})
+
+            # 非同期でコンテンツ生成
+            response = await self.model.generate_content_async(
+                prompt,
+                generation_config=generation_config,
+                safety_settings=safety_settings
+            )
+
+            return response.text
+        except Exception as e:
+            logger.error(f"VertexAI a_generateでエラー: {e}")
+            return f"Error: {e}"
+
+    def get_model_name(self):
+        """
+        モデル名を返すよ。deepevalが内部で使うことがあるんだ。
+        """
+        return self.model_name
 
 # --- 定数 ---
 # このファイル (gemini_service.py) のディレクトリ
@@ -91,261 +177,257 @@ PROMPT_TEMPLATE = """
 # --- DeepEvalのカスタムメトリクス定義 ---
 # アプリケーション起動時にモデルを読み込んでから動的に生成するため、
 # ここでは空の辞書として初期化しておく。
-star_metrics = {}
+# star_metrics = {} # <- GeminiServiceクラスに移動
 
 # グローバル変数としてモデルを保持（アプリケーション起動時に一度だけ初期化）
-gemini_model_instance = None
-gemini_config = {}
+# gemini_model_instance = None # <- GeminiServiceクラスに移動
+# deepeval_model_instance = None # <- GeminiServiceクラスに移動
+# gemini_config = {} # <- GeminiServiceクラスに移動
 
-def load_gemini_config_and_init():
+class GeminiService:
     """
-    設定ファイルからGeminiの情報を読み込み、モデルを初期化する。
+    Geminiモデルとのやり取りを全部担当するサービスクラス。
+    設定の読み込み、モデルの初期化、フィードバック生成、評価まで、
+    このクラス一つで完結するようになってるよ！
     """
-    global gemini_model_instance, gemini_config, star_metrics
-    if gemini_model_instance:
-        return
+    def __init__(self):
+        """
+        コンストラクタ。設定を読み込んで、必要なモデルを全部初期化しちゃう。
+        """
+        self.gemini_model_instance = None
+        self.deepeval_model_instance = None
+        self.gemini_config = {}
+        self.star_metrics = {}
+        # VertexAIクラスのインスタンスに設定を渡せるように保持
+        self.generation_config_for_deepeval = {}
+        self.safety_settings_for_deepeval = {}
+        self._load_config_and_init_models()
 
-    try:
-        if not os.path.exists(GEMINI_CONFIG_PATH):
-            logger.error(f"Gemini設定ファイルが見つかりません: {GEMINI_CONFIG_PATH}")
-            # .exampleファイルをコピーするなどのフォールバック処理も考えられる
-            return
+    def _load_config_and_init_models(self):
+        """
+        設定ファイルからGeminiの情報を読み込んで、モデルを初期化する内部メソッド。
+        コンストラクタから呼ばれるよ。
+        """
+        try:
+            if not os.path.exists(GEMINI_CONFIG_PATH):
+                logger.error(f"Gemini設定ファイルが見つかりません: {GEMINI_CONFIG_PATH}")
+                return
 
-        with open(GEMINI_CONFIG_PATH, 'r', encoding='utf-8') as f:
-            gemini_config = json.load(f)
-        logger.info(f"Gemini設定ファイルを読み込みました: {GEMINI_CONFIG_PATH}")
+            with open(GEMINI_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                self.gemini_config = json.load(f)
+            logger.info(f"Gemini設定ファイルを読み込みました: {GEMINI_CONFIG_PATH}")
 
-        # project_idが空やNoneでないことを確認
-        project_id = gemini_config.get("project_id")
-        if not project_id:
-            logger.error("Gemini設定ファイルに 'project_id' が指定されていません。")
+            project_id = self.gemini_config.get("project_id")
+            location = self.gemini_config.get("location")
+            if not project_id or not location:
+                logger.error("Gemini設定ファイルに 'project_id' または 'location' が指定されていません。")
+                return
+            
+            vertexai.init(project=project_id, location=location)
+            
+            model_name = self.gemini_config.get("model_name", "gemini-1.5-flash-001")
+            self.gemini_model_instance = GenerativeModel(model_name)
+            
+            # DeepEval用の設定をインスタンス変数に保存
+            self.generation_config_for_deepeval = self.gemini_config.get("generation_config", {})
+            self.safety_settings_for_deepeval = self.gemini_config.get("safety_settings", {})
+
+            # DeepEval用のラッパーインスタンスもここで作っちゃう
+            self.deepeval_model_instance = VertexAI(project=project_id, location=location, model_name=model_name)
+            # ラッパーインスタンスにも設定を渡しておく
+            self.deepeval_model_instance.generation_config = self.generation_config_for_deepeval
+            self.deepeval_model_instance.safety_settings = self.safety_settings_for_deepeval
+
+            logger.info(f"✅ Geminiモデル ({model_name}) とDeepEvalラッパーの準備ができました。")
+            self._initialize_deepeval_metrics()
+
+        except Exception as e:
+            logger.error(f"😱 Geminiモデルの初期化中に致命的なエラーが発生: {e}", exc_info=True)
+
+
+    def _initialize_deepeval_metrics(self):
+        """
+        DeepEvalの評価メトリクスを初期化する。
+        モデルの準備ができた後に呼ばれる必要があるから、別のメソッドに分けたよ。
+        """
+        if not self.deepeval_model_instance:
+            logger.error("DeepEvalモデルインスタンスが初期化されてないため、メトリクスを作成できません。")
             return
             
-        vertexai.init(project=project_id, location=gemini_config.get("location"))
-        
-        model_name = gemini_config.get("model_name", "gemini-1.5-flash-001")
-        gemini_model_instance = GenerativeModel(model_name)
-        logger.info(f"Geminiモデル ({model_name}) の準備ができました。")
+        common_params = {
+            "evaluation_params": [LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
+            "model": self.deepeval_model_instance
+        }
 
-        # Geminiモデルの初期化が完了した後に、それを使って評価メトリクスを定義する
-        star_metrics.update({
+        self.star_metrics = {
             "situation": GEval(
                 name="Situation (状況説明)",
-                criteria="""
-                具体的で明確な状況説明ができているか評価してください。
-                - 背景情報（いつ、どこで、誰が）は十分か？
-                - 聞き手が状況を容易に想像できるか？
-                - 簡潔に要点をまとめて話せているか？
-                """,
-                evaluation_params=[
-                    "回答の中からSituation（状況）に関する部分を特定する。",
-                    "特定した部分が、評価基準を満たしているか確認する。",
-                    "0から10のスケールでスコアを付け、その理由を明確に記述する。"
-                ],
-                model=model_name # 評価に使うモデルを明示的に指定！
+                criteria="具体的で明確な状況説明ができているか評価してください...",
+                evaluation_steps=["..."],
+                **common_params
             ),
             "task": GEval(
                 name="Task (課題設定)",
-                criteria="""
-                取り組むべき課題や目標が明確に定義されているか評価してください。
-                - 課題の重要性や困難さが伝わるか？
-                - 自身の役割と責任範囲が明確か？
-                - 目標は具体的で測定可能か？
-                """,
-                evaluation_params=[
-                    "回答の中からTask（課題・目標）に関する部分を特定する。",
-                    "特定した部分が、評価基準を満たしているか確認する。",
-                    "0から10のスケールでスコアを付け、その理由を明確に記述する。"
-                ],
-                model=model_name # 評価に使うモデルを明示的に指定！
+                criteria="取り組むべき課題や目標が明確に定義されているか評価してください...",
+                evaluation_steps=["..."],
+                 **common_params
             ),
             "action": GEval(
-                name="Action (行動内容)",
-                criteria="""
-                課題解決のための具体的な行動が、主体性を持って語られているか評価してください。
-                - 行動の主体は回答者自身（「私」）か？
-                - 行動の意図や思考プロセスが明確か？
-                - 困難な状況にどう立ち向かったかが分かるか？
-                """,
-                evaluation_params=[
-                    "回答の中からAction（行動）に関する部分を特定する。",
-                    "特定した部分が、評価基準を満たしているか確認する。",
-                    "0から10のスケールでスコアを付け、その理由を明確に記述する。"
-                ],
-                model=model_name # 評価に使うモデルを明示的に指定！
+                name="Action (行動)",
+                criteria="具体的な行動や思考プロセスが説明されているか評価してください...",
+                evaluation_steps=["..."],
+                **common_params
             ),
             "result": GEval(
-                name="Result (成果)",
-                criteria="""
-                行動の結果として得られた成果が、具体的に示されているか評価してください。
-                - 成果は定量的（数値、%）または定性的に明確か？
-                - 行動と成果の因果関係は論理的か？
-                - 結果からの学びや再現性について言及できているか？
-                """,
-                evaluation_params=[
-                    "回答の中からResult（結果）に関する部分を特定する。",
-                    "特定した部分が、評価基準を満たしているか確認する。",
-                    "0から10のスケールでスコアを付け、その理由を明確に記述する。"
-                ],
-                model=model_name # 評価に使うモデルを明示的に指定！
+                name="Result (結果)",
+                criteria="行動の結果として得られた成果が具体的に示されているか評価してください...",
+                evaluation_steps=["..."],
+                **common_params
+            ),
+        }
+        logger.info("✅ DeepEvalのSTAR評価メトリクスが初期化されました。")
+
+    @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3))
+    async def generate_structured_feedback(self, evaluation_context: dict) -> dict:
+        """
+        入力情報から、STARメソッドに基づいた構造化されたフィードバックを非同期で生成するよ。
+        リトライ処理も入れて、APIエラーに強くしてある！
+        """
+        if not self.gemini_model_instance:
+            logger.error("Geminiモデルが初期化されていません。フィードバックを生成できません。")
+            return {"error": "Gemini model not initialized"}
+
+        prompt = PROMPT_TEMPLATE.format(**evaluation_context)
+        logger.info("Geminiにフィードバック生成をリクエストします。")
+        
+        try:
+            response = await self.gemini_model_instance.generate_content_async(
+                [prompt],
+                generation_config=self.gemini_config.get("generation_config", {}),
+                safety_settings=self.gemini_config.get("safety_settings", {})
             )
-        })
-        logger.info(f"DeepEvalメトリクスを評価モデル '{model_name}' で初期化しました。")
-
-    except FileNotFoundError:
-        # このエラーは上のos.path.existsで捕捉されるはずだが、念のため
-        logger.error(f"Gemini設定ファイルが見つかりません: {GEMINI_CONFIG_PATH}")
-        gemini_config = {}
-    except Exception as e:
-        logger.error(f"Geminiの初期化中にエラーが発生しました: {e}", exc_info=True)
-        gemini_model_instance = None
-
-# アプリケーション起動時に一度呼び出す
-load_gemini_config_and_init()
-
-async def generate_structured_feedback(evaluation_context: dict) -> dict:
-    """
-    Gemini評価APIとDeepEvalメトリクスを非同期で呼び出し、構造化された評価結果(dict)を返す。
-    """
-    if not gemini_model_instance:
-        logger.error("Geminiモデルが初期化されていないため、評価を実行できません。")
-        return {
-            "error": "Gemini model not initialized.",
-            "raw_evaluation": "評価モデルが初期化されていません。",
-            "score": 0
-        }
-
-    # --- evaluation_contextから必要な情報を取り出す ---
-    # speech_processor._run_final_evaluation() で作成された辞書を想定
-    transcript = evaluation_context.get('full_transcript', '')
-    pitch_analysis = evaluation_context.get('pitch_analysis', {})
-    emotion_analysis = evaluation_context.get('emotion_analysis', {})
-    interview_question = evaluation_context.get('question', '指定なし')
-
-    # 1. GeminiにJSON形式での全体評価をリクエスト
-    # プロンプトに情報を埋め込む
-    prompt = PROMPT_TEMPLATE.format(
-        interview_question=interview_question,
-        transcript=transcript,
-        # speech_processor._summarize_pitch_data() のキー名と完全に一致させる！
-        average_pitch=pitch_analysis.get("average_pitch", "N/A"),
-        pitch_variation=pitch_analysis.get("pitch_variation", "N/A"),
-        # ↓以下の項目は現状の実装では計算していないため、"N/A"とする
-        speaking_rate="N/A",
-        pause_frequency="N/A",
-        average_pause_duration="N/A",
-        # speech_processor._handle_emotion_data() のキー名と完全に一致させる！
-        dominant_emotion=emotion_analysis.get("dominant_emotion", "N/A"),
-        emotion_score=emotion_analysis.get("emotion_score", "N/A"),
-        emotion_intensity=emotion_analysis.get("emotion_intensity", "N/A"),
-        emotion_transition=emotion_analysis.get("emotion_transition", "N/A")
-    )
-    
-    # --- モデルの設定を読み込む ---
-    generation_config = gemini_config.get("generation_config", {
-        "temperature": 0.7,
-        "top_p": 1.0,
-        "max_output_tokens": 2048,
-    })
-    
-    safety_settings = {
-        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    }
-
-    # 2. DeepEvalメトリクスで各項目を個別評価 (非同期で並列実行！)
-    test_case = LLMTestCase(
-        input=interview_question,
-        actual_output=transcript,
-        # TODO: 将来的には理想的な回答例(expected_output)も用意して、より高度な評価も可能！
-    )
-    
-    evaluation_tasks = []
-    for name, metric in star_metrics.items():
-        # measureはブロッキングする可能性があるので、to_threadで別スレッドで実行するのが安全
-        task = asyncio.to_thread(metric.measure, test_case)
-        evaluation_tasks.append(task)
-    
-    results = await asyncio.gather(*evaluation_tasks)
-    
-    deepeval_scores = {}
-    for i, name in enumerate(star_metrics.keys()):
-        # measure() はメトリクスオブジェクトを返すので、.scoreでスコアを取得
-        # スコアは0-1なので、10点満点に変換する
-        score = round(results[i].score * 10)
-        reasoning = results[i].reason
-        deepeval_scores[name] = {"score": score, "reasoning": reasoning}
-        logger.info(f"📊 DeepEval - {name}: score={score}/10, reasoning='{reasoning[:50]}...'")
-
-    # 3. Geminiの評価とDeepEvalのスコアをマージする（将来的にはもっと賢くマージする）
-    # 現状は、まずGeminiに全体評価のJSONを作らせてから、
-    # DeepEvalで算出した客観的スコアで上書き・補強する戦略！
-
-    try:
-        logger.info("Geminiに評価をリクエストします...")
-        response = await gemini_model_instance.generate_content_async(
-            [prompt],
-            generation_config=generation_config,
-            safety_settings=safety_settings
-        )
-        logger.info("Geminiからの評価レスポンスを受信しました。")
-        
-        # レスポンスからJSON文字列をパース
-        response_text = response.text
-        parsed_json = parse_gemini_response_data(response_text)
-        
-        # DeepEvalのスコアでJSONを更新！
-        if parsed_json and "star_evaluation" in parsed_json:
-            total_score = 0
-            for name, data in deepeval_scores.items():
-                if name in parsed_json["star_evaluation"]:
-                    parsed_json["star_evaluation"][name]["score"] = data["score"]
-                    # GeminiのfeedbackとDeepEvalのreasoningを組み合わせる
-                    parsed_json["star_evaluation"][name]["feedback"] += f" (客観スコア理由: {data['reasoning']})"
-                total_score += data["score"]
             
-            parsed_json["overall_score"] = total_score
-            logger.info("✅ DeepEvalのスコアでGeminiの評価結果を更新しました。")
+            logger.info("Geminiからのレスポンスを受信しました。")
+            
+            # パース処理を呼び出す
+            parsed_data = self._parse_gemini_response_data(response.text)
+            
+            # deepevalは開発/評価時のみ有効化するなど、条件分岐を入れると良さそう
+            # if os.getenv("ENABLE_DEEPEVAL", "false").lower() == "true":
+            #     if parsed_data and "star_evaluation" in parsed_data:
+            #         deepeval_results = await self._evaluate_with_deepeval(evaluation_context, parsed_data)
+            #         parsed_data['deepeval_results'] = deepeval_results
 
-        return parsed_json
+            return parsed_data
 
-    except Exception as e:
-        logger.error(f"Gemini評価の生成または解析中にエラーが発生しました: {e}", exc_info=True)
-        return {
-            "error": str(e),
-            "raw_evaluation": f"Gemini評価中にエラーが発生しました: {e}",
-            "score": 0
-        }
+        except google_exceptions.ResourceExhausted as e:
+            logger.error(f"リソース上限超過エラー: {e}")
+            raise  # 再試行のために例外を再度送出
+        except Exception as e:
+            logger.error(f"Geminiフィードバック生成中に予期せぬエラー: {e}", exc_info=True)
+            return {"error": f"An unexpected error occurred: {e}"}
 
-def parse_gemini_response_data(response_text: str) -> dict:
-    """
-    Geminiからの生のテキストレスポンスをパースして、
-    フロントエンドで使いやすい辞書形式に変換する。
-    """
-    # ここでは単純な実装例として、テキスト全体と仮のスコアを返す。
-    # TODO: 正規表現やキーワード検索を使って、レスポンスから各項目を抽出する
-    # 例: 総合評価、STAR評価の各項目、改善点、アピールポイントなど
-    
-    score = 50  # 仮のスコア
-    try:
-        # "総合評価 (5段階)" の部分を探してスコアを抽出する
-        # 例: "総合評価 (5段階)\n3. 良い" -> 3
-        # 簡単な正規表現で実装してみる
-        import re
-        match = re.search(r"総合評価\s*\(5段階\)\s*[:\n\s]*(\d+)", response_text)
-        if match:
-            # 評価(1-5)を100点満点に変換 (1->20, 2->40, 3->60, 4->80, 5->100)
-            score = int(match.group(1)) * 20
-    except Exception:
-        # パースに失敗してもエラーにしない
-        pass
+    async def _evaluate_with_deepeval(self, context: dict, llm_output: dict) -> dict:
+        """
+        DeepEvalを使って、生成されたフィードバックの品質をメタ評価する内部メソッド。
+        """
+        if not self.star_metrics:
+            logger.warning("DeepEvalメトリクスが利用できません。メタ評価をスキップします。")
+            return {}
+            
+        # 評価用のテストケースを作成
+        test_case = LLMTestCase(
+            input=context['transcript'],
+            actual_output=json.dumps(llm_output, ensure_ascii=False)
+        )
+        
+        evaluation_results = {}
+        tasks = []
+        for name, metric in self.star_metrics.items():
+            async def measure_metric(metric_name, metric_instance):
+                try:
+                    await metric_instance.a_measure_async(test_case)
+                    evaluation_results[metric_name] = {
+                        "score": metric_instance.score,
+                        "reason": metric_instance.reason
+                    }
+                    logger.info(f"DeepEval評価 ({metric_name}): Score={metric_instance.score}")
+                except Exception as e:
+                    logger.error(f"DeepEval評価 ({metric_name}) でエラーが発生: {e}")
+                    evaluation_results[metric_name] = {"score": None, "reason": str(e)}
+            
+            tasks.append(measure_metric(name, metric))
+        
+        await asyncio.gather(*tasks)
+        return evaluation_results
 
-    return {
-        "raw_evaluation": response_text,
-        "score": score,
-        # "star_situation": "...", # 将来的にパースして追加
-        # "star_task": "...",
-        # ...
-    } 
+    def _parse_gemini_response_data(self, response_text: str) -> dict:
+        """
+        Geminiからの生のテキストレスポンスをパースして、JSON形式の辞書に変換する。
+        マークダウンの```json ... ```ブロックがあっても大丈夫なようにしてるよ。
+        """
+        logger.debug(f"パース対象のレスポンス: {response_text}")
+        try:
+            # ```json ... ``` のようなマークダウンコードブロックを抽出
+            match = re.search(r"```json\s*([\s\S]+?)\s*```", response_text)
+            if match:
+                json_str = match.group(1)
+            else:
+                # JSONコードブロックが見つからない場合は、テキスト全体をJSONとしてパース試行
+                json_str = response_text
+
+            # JSON文字列をPythonの辞書に変換
+            data = json.loads(json_str)
+            
+            # スコアの合計が正しいかチェック・修正
+            if "star_evaluation" in data and "overall_score" in data:
+                # scoreがNoneになる可能性も考慮
+                valid_scores = [
+                    item.get("score") for item in data["star_evaluation"].values() 
+                    if isinstance(item.get("score"), (int, float))
+                ]
+                calculated_score = sum(valid_scores)
+                
+                # 比較対象も数値か確認
+                provided_score = data["overall_score"]
+                if isinstance(provided_score, (int, float)) and provided_score != calculated_score:
+                    logger.warning(
+                        f"Overall score mismatch. Provided: {provided_score}, "
+                        f"Calculated: {calculated_score}. "
+                        "Using calculated score."
+                    )
+                    data["overall_score"] = calculated_score
+            
+            logger.info("GeminiレスポンスのJSONパースに成功しました。")
+            return data
+        except json.JSONDecodeError as e:
+            logger.error(f"JSONパースエラー: {e}\n対象テキスト: {response_text[:500]}")
+            return {"error": "Failed to parse JSON response", "raw_response": response_text}
+        except Exception as e:
+            logger.error(f"レスポンスパース中に予期せぬエラー: {e}", exc_info=True)
+            return {"error": f"An unexpected error occurred during parsing: {e}", "raw_response": response_text}
+
+# --- シングルトンインスタンス管理 ---
+gemini_service_instance = None
+
+def get_gemini_service():
+    """シングルトンパターンでGeminiServiceのインスタンスを返す"""
+    global gemini_service_instance
+    if gemini_service_instance is None:
+        logger.info("GeminiServiceの新しいインスタンスを作成します。")
+        gemini_service_instance = GeminiService()
+    return gemini_service_instance
+
+# --- 後方互換性のためのラッパー関数 ---
+# 古い関数に依存している他のモジュールを壊さないための一時的な措置
+async def generate_structured_feedback(evaluation_context: dict) -> dict:
+    """古い関数呼び出し用の非同期ラッパー。新しいGeminiServiceを経由して実行する。"""
+    logger.warning("非推奨: 'generate_structured_feedback' を直接呼び出しています。'get_gemini_service' を使用してください。")
+    service = get_gemini_service()
+    return await service.generate_structured_feedback(evaluation_context)
+
+# 以下のグローバル変数の初期化は、GeminiServiceクラスの__init__に統合されたため不要
+# def load_gemini_config_and_init(): ...
+# def parse_gemini_response_data(response_text: str) -> dict: ...
+# async def generate_structured_feedback(evaluation_context: dict) -> dict: ...
+# はクラスメソッドに移動したため、グローバルスコープからは削除 
