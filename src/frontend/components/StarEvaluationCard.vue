@@ -3,40 +3,38 @@
     <div class="flex justify-between items-center mb-4">
       <h2 class="text-xl font-bold text-gray-900 dark:text-white">{{ title }}</h2>
        <span
-        v-if="score"
+        v-if="score !== null && score !== undefined"
         :class="getScoreColor(score)"
         class="text-sm font-bold px-2.5 py-0.5 rounded-full"
         data-testid="score-badge"
       >
-        {{ score.toFixed(0) }} / 100
+        {{ score }} / 10
       </span>
     </div>
     <div class="prose prose-sm max-w-none dark:prose-invert">
-      <slot name="feedback">
-        <p class="text-gray-500 dark:text-gray-400">フィードバックはありません。</p>
-      </slot>
+      <p v-if="feedback" class="text-gray-600 dark:text-gray-300">{{ feedback }}</p>
+      <p v-else class="text-gray-500 dark:text-gray-400">フィードバックはありません。</p>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
-
 const props = defineProps<{
   title: string;
   score: number | null;
+  feedback: string | null;
 }>();
 
 /**
  * @description スコアに基づいてTailwind CSSのクラスを返す関数
- * @param {number} score - 評価スコア (0-100)
+ * @param {number} score - 評価スコア (0-10)
  * @returns {string} Tailwind CSSのクラス文字列
  */
 const getScoreColor = (score: number | null): string => {
   if (score === null) return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
-  if (score >= 80) {
+  if (score >= 8) {
     return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300';
-  } else if (score >= 60) {
+  } else if (score >= 5) {
     return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300';
   } else {
     return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300';
