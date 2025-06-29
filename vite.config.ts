@@ -14,7 +14,8 @@ export default defineConfig({
   publicDir: 'src/frontend/public',
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(__dirname, './src/frontend'),
+      '~': path.resolve(__dirname, './src/lib'),
     },
   },
   /*

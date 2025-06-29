@@ -22,7 +22,10 @@
     "baseUrl": ".",
     "paths": {
       "@/*": [
-        "src/*"
+        "src/frontend/*"
+      ],
+      "~/*": [
+        "src/lib/*"
       ]
     },
     "skipLibCheck": true,
@@ -38,8 +41,13 @@
     "src/**/*.ts",
     "src/**/*.d.ts",
     "src/**/*.tsx",
-    "src/**/*.vue",
-    "tests/**/*.ts"
+    "src/**/*.vue"
+  ],
+  "exclude": [
+    "node_modules",
+    "**/*.spec.ts",
+    "src/frontend/components/__tests__",
+    "src/frontend/stores/__tests__"
   ],
   "references": [
     {

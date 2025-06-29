@@ -8,7 +8,7 @@ import {
   nextTick,
   defineExpose,
 } from 'vue'
-import { useInterviewStore } from '@/frontend/stores/interview'
+import { useInterviewStore } from '@/stores/interview'
 import { Line, Chart } from 'vue-chartjs'
 import {
   Chart as ChartJS,

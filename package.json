@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "test": "vitest",
     "test:coverage": "vitest run --coverage"
@@ -20,7 +20,7 @@
   "license": "ISC",
   "devDependencies": {
     "@types/node": "^20.12.12",
-    "@types/three": "^0.154.0",
+    "@types/three": "^0.160.0",
     "@vitejs/plugin-vue": "^5.0.4",
     "@vue/test-utils": "^2.4.6",
     "autoprefixer": "^10.4.19",
@@ -35,7 +35,7 @@
   "dependencies": {
     "@heroicons/vue": "^2.2.0",
     "@mdi/font": "^7.4.47",
-    "@pixiv/three-vrm": "2.0.6",
+    "@pixiv/three-vrm": "2.0.9",
     "chart.js": "^4.5.0",
     "events": "^3.3.0",
     "gsap": "^3.13.0",

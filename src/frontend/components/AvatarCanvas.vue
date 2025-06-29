@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue';
-import { useInterviewStore } from '@/frontend/stores/interview';
-import { AvatarController } from '@/frontend/vrm/AvatarController';
-import { IdleAnimation } from '@/lib/vrm/IdleAnimation';
-import { LipSync } from '@/lib/vrm/LipSync';
-import logger from '@/lib/logger';
+import { useInterviewStore } from '@/stores/interview';
+import { AvatarController } from '@/vrm/AvatarController';
+import { IdleAnimation } from '~/vrm/IdleAnimation';
+import { LipSync } from '~/vrm/LipSync';
+import logger from '~/logger';
 
 const containerRef = ref<HTMLDivElement | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);

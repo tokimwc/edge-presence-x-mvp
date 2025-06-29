@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useInterviewStore, type StarEvaluation, type OverallFeedback } from '@/frontend/stores/interview'
+import type { StarEvaluation, OverallFeedback } from '@/stores/interview'
+import { useInterviewStore } from '@/stores/interview'
 import StarEvaluationCard from './StarEvaluationCard.vue'
 
 const interviewStore = useInterviewStore()

@@ -1,5 +1,5 @@
-import logger from '@/lib/logger';
-import { useInterviewStore } from '@/frontend/stores/interview';
+import logger from '~/logger';
+import { useInterviewStore } from '@/stores/interview';
 import { ref } from 'vue';
 
 const isInitialized = ref(false);
@@ -260,4 +260,9 @@ export async function stopInterview() {
   const store = useInterviewStore();
   store.$reset(); // Piniaストアを初期状態にリセット
   logger.info('✅ 面接の全リソースを解放し、ストアをリセットしました。');
+}
+
+export function initializeWebSocket() {
+  const interviewStore = useInterviewStore();
+  // ... existing code ...
 } 

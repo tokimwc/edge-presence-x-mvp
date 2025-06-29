@@ -248,48 +248,57 @@ export const useInterviewStore = defineStore('interview', () => {
   function connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       if (socket && socket.readyState === WebSocket.OPEN) {
-        console.warn('WebSocket is already connected.');
-        return resolve();
-      }
-
-      connectionState.value = 'connecting';
-
-      // 環境変数からWebSocketのURLを取得。なければハードコードされたURLをフォールバックとして使用
-      const socketUrl = import.meta.env.VITE_WEBSOCKET_URL || 'ws://localhost:8000/ws/v1/interview';
-      console.log(`🔌 Connecting to WebSocket at: ${socketUrl}`);
-      socket = new WebSocket(socketUrl);
-
-      socket.onopen = () => {
-        connectionState.value = 'connected';
-        console.log('🎉 WebSocket connection established!');
+        console.log('✅ すでに接続済みです');
         resolve();
-      };
+        return;
+      }
+      
+      // const socketUrl = import.meta.env.VITE_WEBSOCKET_URL || 'ws://localhost:8000/ws/v1/interview';
+      const socketUrl = 'wss://ep-x-backend-495003035191.asia-northeast1.run.app/ws/v1/interview';
+      console.log(`🔌 Connecting to WebSocket at: ${socketUrl}`);
 
-      socket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          handleWebsocketMessage(data); // 新しいハンドラを呼び出す
-        } catch (error) {
-          console.error('Error parsing WebSocket message:', error);
-          errorMessage.value = 'Failed to parse server message.';
-        }
-      };
+      try {
+        socket = new WebSocket(socketUrl);
 
-      socket.onerror = (error) => {
-        console.error('WebSocket error:', error);
+        connectionState.value = 'connecting';
+
+        socket.onopen = () => {
+          connectionState.value = 'connected';
+          console.log('🎉 WebSocket connection established!');
+          resolve();
+        };
+
+        socket.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            handleWebsocketMessage(data); // 新しいハンドラを呼び出す
+          } catch (error) {
+            console.error('Error parsing WebSocket message:', error);
+            errorMessage.value = 'Failed to parse server message.';
+          }
+        };
+
+        socket.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          connectionState.value = 'error';
+          errorMessage.value = 'WebSocket connection failed.';
+          reject(error);
+        };
+
+        socket.onclose = () => {
+          connectionState.value = 'disconnected';
+          isInterviewActive.value = false; // 古い値も更新しておく
+          if (interviewState.value !== 'finished' && interviewState.value !== 'error') {
+            interviewState.value = 'idle';
+          }
+          console.log('WebSocket connection closed.');
+        };
+      } catch (error) {
+        console.error('WebSocket connection error:', error);
         connectionState.value = 'error';
         errorMessage.value = 'WebSocket connection failed.';
         reject(error);
-      };
-
-      socket.onclose = () => {
-        connectionState.value = 'disconnected';
-        isInterviewActive.value = false; // 古い値も更新しておく
-        if (interviewState.value !== 'finished' && interviewState.value !== 'error') {
-          interviewState.value = 'idle';
-        }
-        console.log('WebSocket connection closed.');
-      };
+      }
     });
   }
 
