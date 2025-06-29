@@ -1,7 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
+import {
+  ref,
+  onMounted,
+  onUnmounted,
+  watch,
+  computed,
+  nextTick,
+  defineExpose,
+} from 'vue'
 import { useInterviewStore } from '@/frontend/stores/interview'
-import { Line } from 'vue-chartjs'
+import { Line, Chart } from 'vue-chartjs'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -27,6 +35,8 @@ const interviewStore = useInterviewStore()
 
 const volume = ref(0)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
+const containerRef = ref<HTMLDivElement | null>(null)
+const lineChartRef = ref<typeof Chart | null>(null)
 
 let audioContext: AudioContext | null = null
 let analyser: AnalyserNode | null = null
@@ -167,6 +177,22 @@ function stopAudioAnalysis() {
   volume.value = 0
 }
 
+function resize() {
+  nextTick(() => {
+    if (canvasRef.value && containerRef.value) {
+      const parent = containerRef.value
+      canvasRef.value.width = parent.clientWidth - 16 // pa-2
+      canvasRef.value.height = 100
+      drawWaveform()
+    }
+    lineChartRef.value?.chart.resize()
+  })
+}
+
+defineExpose({
+  resize,
+})
+
 watch(
   () => interviewStore.localStream,
   (newStream, oldStream) => {
@@ -179,6 +205,10 @@ watch(
   { immediate: true }
 )
 
+onMounted(() => {
+  resize()
+})
+
 onUnmounted(() => {
   stopAudioAnalysis()
   audioContext?.close()
@@ -186,8 +216,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="voice-analyzer pa-2">
-    <v-row align="center" no-gutters>
+  <div ref="containerRef" class="voice-analyzer d-flex flex-column pa-2">
+    <v-row align="center" no-gutters class="flex-shrink-0">
       <v-col cols="auto" class="mr-3">
         <v-icon>mdi-volume-high</v-icon>
       </v-col>
@@ -200,9 +230,9 @@ onUnmounted(() => {
         ></v-progress-linear>
       </v-col>
     </v-row>
-    <canvas ref="canvasRef" class="mt-2" width="500" height="100"></canvas>
-    <div class="mt-4" style="height: 200px">
-      <Line :data="pitchChartData" :options="pitchChartOptions" />
+    <canvas ref="canvasRef" class="mt-2 flex-shrink-0"></canvas>
+    <div class="mt-4 flex-grow-1" style="position: relative;">
+      <Line ref="lineChartRef" :data="pitchChartData" :options="pitchChartOptions" />
     </div>
   </div>
 </template>
@@ -210,10 +240,10 @@ onUnmounted(() => {
 <style scoped>
 .voice-analyzer {
   width: 100%;
+  height: 100%;
 }
 canvas {
   width: 100%;
-  height: 100px;
   background-color: #1a1a1a;
   border-radius: 4px;
 }

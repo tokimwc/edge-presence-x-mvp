@@ -14,8 +14,8 @@ export default defineConfig({
   publicDir: 'src/frontend/public',
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src')
-    }
+      '@': path.resolve(__dirname, './src'),
+    },
   },
   /*
   optimizeDeps: {
@@ -23,6 +23,7 @@ export default defineConfig({
   },
   */
   server: {
-    //
+    host: '0.0.0.0',
+    port: 5173,
   }
 }); 

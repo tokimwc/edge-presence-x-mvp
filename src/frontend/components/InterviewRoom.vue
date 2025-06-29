@@ -8,13 +8,15 @@ import VoiceAnalyzer from './VoiceAnalyzer.vue';
 import EmotionHeatmap from './EmotionHeatmap.vue';
 import STARFeedback from './STARFeedback.vue';
 import { useInterviewStore } from '../stores/interview';
-import { onMounted, ref, watch } from 'vue';
+import { onMounted, ref, watch, nextTick } from 'vue';
 import type { InterviewState } from '../stores/interview';
 
 const interviewStore = useInterviewStore();
 
 const localVideo = ref<HTMLVideoElement | null>(null);
 const selectedTab = ref('transcription');
+const avatarCanvasRef = ref<InstanceType<typeof AvatarCanvas> | null>(null);
+const voiceAnalyzerRef = ref<InstanceType<typeof VoiceAnalyzer> | null>(null);
 
 /**
  * 面接の主要な状態に基づいて、表示するべきUIコンポーネントを決定します。
@@ -24,6 +26,13 @@ const selectedTab = ref('transcription');
  * @returns 'welcome' | 'room' | 'error'
  */
 const currentView = ref<'welcome' | 'room' | 'error'>('welcome');
+
+const onPaneResized = () => {
+  nextTick(() => {
+    avatarCanvasRef.value?.resize();
+    voiceAnalyzerRef.value?.resize();
+  });
+};
 
 watch(
   () => interviewStore.interviewState,
@@ -60,7 +69,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <v-container fluid class="fill-height pa-0">
+  <v-container fluid class="fill-height pa-0" style="height: 100vh; overflow: hidden;">
     <!-- Connection Status -->
     <v-row
       v-if="interviewStore.connectionState !== 'connected'"
@@ -140,14 +149,23 @@ onMounted(() => {
     </v-row>
 
     <!-- Main Interview Room -->
-    <splitpanes v-else class="fill-height" style="height: 100%;">
+    <splitpanes
+      v-else
+      class="fill-height"
+      style="height: 100vh"
+      @resized="onPaneResized"
+    >
       <!-- Left Panel: Avatar and Voice -->
       <pane min-size="40">
-        <splitpanes horizontal style="height: 100%;">
-          <pane class="pa-2" style="padding-bottom: 4px;">
+        <splitpanes
+          horizontal
+          style="height: 100%"
+          @resized="onPaneResized"
+        >
+          <pane size="70" class="pa-2" style="padding-bottom: 4px">
             <v-card class="d-flex flex-column h-100" elevation="2">
               <div class="flex-grow-1 bg-black rounded-lg position-relative">
-                <AvatarCanvas class="w-100 h-100" />
+                <AvatarCanvas ref="avatarCanvasRef" class="w-100 h-100" />
                 <video
                   v-if="interviewStore.localStream"
                   ref="localVideo"
@@ -159,9 +177,9 @@ onMounted(() => {
               </div>
             </v-card>
           </pane>
-          <pane size="30" min-size="20" max-size="40" class="pa-2" style="padding-top: 4px;">
+          <pane size="30" class="pa-2" style="padding-top: 4px">
             <v-card class="h-100 pa-2" elevation="2">
-              <VoiceAnalyzer class="h-100" />
+              <VoiceAnalyzer ref="voiceAnalyzerRef" class="h-100" />
             </v-card>
           </pane>
         </splitpanes>

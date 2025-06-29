@@ -1,6 +1,7 @@
 {
   "name": "edge-presence-x-mvp",
   "version": "1.0.0",
+  "private": true,
   "description": "[![Google Cloud](https://img.shields.io/badge/Google%20Cloud-Ready-4285F4?logo=google-cloud)](https://cloud.google.com/)\r [![Vertex AI](https://img.shields.io/badge/Vertex%20AI-Gemini%201.5%20Flash-34A853?logo=google-cloud)](https://cloud.google.com/vertex-ai)\r [![Natural Language API](https://img.shields.io/badge/Natural%20Language%20API-Enabled-blue?logo=google-cloud)](https://cloud.google.com/natural-language)\r [![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)",
   "main": "index.js",
   "directories": {
@@ -9,38 +10,42 @@
   },
   "scripts": {
     "dev": "vite",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "test:unit": "vitest"
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@types/node": "^22.15.30",
-    "@vitejs/plugin-vue": "^5.2.4",
+    "@types/node": "^20.12.12",
+    "@types/three": "^0.154.0",
+    "@vitejs/plugin-vue": "^5.0.4",
     "@vue/test-utils": "^2.4.6",
-    "jsdom": "^26.1.0",
-    "vite": "^6.3.5",
-    "vite-tsconfig-paths": "^5.1.4",
-    "vitest": "^3.2.2"
+    "autoprefixer": "^10.4.19",
+    "happy-dom": "^14.12.0",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.3",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.11",
+    "vitest": "^1.6.0",
+    "vue-tsc": "^2.0.19"
   },
   "dependencies": {
     "@heroicons/vue": "^2.2.0",
     "@mdi/font": "^7.4.47",
-    "@pixiv/three-vrm": "^2.0.0",
-    "@types/d3": "^7.4.3",
-    "@types/marked": "^5.0.2",
-    "chart.js": "^4.1.1",
-    "d3": "^7.0.0",
-    "gsap": "^3.12.5",
-    "marked": "^15.0.12",
-    "pinia": "^3.0.3",
-    "splitpanes": "^4.0.4",
-    "three": "^0.164.1",
+    "@pixiv/three-vrm": "2.0.6",
+    "chart.js": "^4.5.0",
+    "events": "^3.3.0",
+    "gsap": "^3.13.0",
+    "pinia": "^2.1.7",
+    "splitpanes": "^3.1.5",
+    "three": "0.160.1",
     "vite-plugin-vuetify": "^2.1.1",
-    "vue": "^3.5.16",
+    "vue": "^3.4.27",
     "vue-chartjs": "^5.3.2",
-    "vue-router": "^4.5.1",
-    "vuetify": "^3.5.0"
+    "vue-router": "^4.3.2",
+    "vuetify": "^3.6.8"
   }
 }
