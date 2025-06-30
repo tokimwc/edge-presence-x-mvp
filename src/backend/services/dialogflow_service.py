@@ -2,6 +2,7 @@
 
 import os
 import uuid
+import google.auth
 from google.cloud import dialogflow_v2 as dialogflow
 from google.api_core.client_options import ClientOptions
 from dotenv import load_dotenv
@@ -16,13 +17,16 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # --- 環境変数の設定（GCPプロジェクトID） ---
-# Cloud Runで設定された環境変数から取得することを推奨
-PROJECT_ID = os.getenv("VERTEX_AI_PROJECT")
+# 標準的な 'GOOGLE_CLOUD_PROJECT' を使うように変更
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
 if not PROJECT_ID:
-    # ローカルでの開発用に、フォールバックの値やエラーハンドリングをしてもOK
-    logger.warning("環境変数 'VERTEX_AI_PROJECT' が設定されていません。")
-    # 例: raise ValueError("GCPプロジェクトIDが設定されていません。")
-    # ここでは、とりあえずNoneのまま進める
+    # GCP環境で実行されている場合、認証情報からプロジェクトIDを自動取得
+    try:
+        _, PROJECT_ID = google.auth.default()
+        logger.info(f"環境変数が見つからないため、GCPのデフォルトプロジェクトID ({PROJECT_ID}) を使用します。")
+    except google.auth.exceptions.DefaultCredentialsError:
+        logger.error("GCPのデフォルト認証情報が見つかりませんでした。プロジェクトIDが不明です。")
+        PROJECT_ID = None  # フォールバック
 
 async def analyze_sentiment(session_id: str, text: str, language_code: str = 'ja'):
     """
@@ -45,20 +49,27 @@ async def analyze_sentiment(session_id: str, text: str, language_code: str = 'ja
 
     try:
         # --- リージョンに基づいてクライアントオプションとセッションパスを設定 ---
-        client_options = None
+        client_options_instance = None
         session_path = ""
         if DIALOGFLOW_LOCATION:
+            # ★★★★★ ここからがマジで超重要！ ★★★★★
+            # 1. リージョンを指定するための設定を作成
             api_endpoint = f"{DIALOGFLOW_LOCATION}-dialogflow.googleapis.com"
-            client_options = ClientOptions(api_endpoint=api_endpoint)
+            client_options_instance = ClientOptions(api_endpoint=api_endpoint)
+            logger.info(f"Dialogflowのリージョンエンドポイントを明示的に設定します: {api_endpoint}")
+            
+            # 2. リージョン設定を使ってクライアントを初期化
+            session_client = dialogflow.SessionsAsyncClient(client_options=client_options_instance)
+
+            # 3. セッションパスを【手動で】構築する (v2ライブラリのヘルパーはlocation非対応のため)
             session_path = f"projects/{PROJECT_ID}/locations/{DIALOGFLOW_LOCATION}/agent/sessions/{session_id}"
-            logger.info(f"Dialogflowのリージョンエンドポイントを使用します: {api_endpoint}")
+            # ★★★★★ ここまでがマジで超重要！ ★★★★★
         else:
             # グローバルエンドポイント用のフォールバック
-            session_path = f"projects/{PROJECT_ID}/agent/sessions/{session_id}"
+            session_client = dialogflow.SessionsAsyncClient()
+            session_path = session_client.session_path(project=PROJECT_ID, session=session_id)
             logger.info("Dialogflowのグローバルエンドポイントを使用します。")
         
-        # --- 非同期セッションクライアントの初期化 ---
-        session_client = dialogflow.SessionsAsyncClient(client_options=client_options)
         logger.debug(f"Dialogflowセッションパス: {session_path}")
 
         text_input = dialogflow.TextInput(text=text, language_code=language_code)
@@ -107,7 +118,7 @@ async def main_test():
     ]
 
     if not PROJECT_ID:
-        logger.error("テスト実行には、環境変数 'VERTEX_AI_PROJECT' の設定が必要です。")
+        logger.error("テスト実行には、環境変数 'GOOGLE_CLOUD_PROJECT' の設定が必要です。")
     else:
         for t in test_texts:
             result = await analyze_sentiment(test_session_id, t)
@@ -119,5 +130,5 @@ async def main_test():
 
 if __name__ == '__main__':
     # このテストを実行するには、事前に `gcloud auth application-default login` を実行し、
-    # 環境変数 `VERTEX_AI_PROJECT` にあなたのGCPプロジェクトIDを設定してください。
+    # 環境変数 `GOOGLE_CLOUD_PROJECT` にあなたのGCPプロジェクトIDを設定してください。
     asyncio.run(main_test()) 
