@@ -1,83 +1,128 @@
-# 🚀 EP-X: GCPデプロイ手順書 (完全版)
+# 🚀 EP-X: デプロイ手順書 (完全版)
 
-このドキュメントは、EP-XバックエンドをGoogle Cloud Runにデプロイするための完全な手順書です。
-あの激闘を忘れないために、ここに全てを記録します。
+このドキュメントは、EP-XアプリケーションをGoogle Cloud (バックエンド) と Firebase Hosting (フロントエンド) にデプロイするための完全な手順書です。
+数々の激闘の末に確立された、最も確実な方法をここに記録します。
 
-## 🔥 0. 前提条件 (Prerequisites)
+---
 
+## 🔥 Part 1: バックエンド (Cloud Run) のデプロイ
+
+バックエンドのPythonサーバーは、DockerコンテナとしてCloud Runにデプロイします。
+
+### 0. 前提条件
 - `gcloud` CLIがインストールされ、認証済みであること。
-  ```
+  ```bash
   gcloud auth login
-  gcloud config set project edge-presence-x-mvp-463704
+  gcloud config set project [YOUR_GCP_PROJECT_ID]
   ```
-- `Docker`がインストールされていること。
-- このリポジトリがローカルにクローンされていること。
+- `Docker`がローカルにインストールされていること。
 
-## 💎 1. 秘密の鍵を準備！(Secret Manager)
+### 1. サービスアカウントキーの準備
+アプリケーションがGCPのAIサービス（Speech-to-Text, Vertex AIなど）と通信するために、認証情報が必要です。
 
-EP-Xは、GoogleのAIサービスと会話するために「サービスアカウントキー」を、感情分析のために「Dialogflow」を使います。（もし他の外部APIキーが必要な場合も同様に準備します）
+1.  GCPコンソールでサービスアカウントキー（JSONファイル）を作成・ダウンロードします。
+2.  ダウンロードしたキーを、プロジェクトの `config` フォルダに `gcp-key.json` という名前で配置します。
 
-### 1-1. 必要なAPIを有効化
+### 2. コンテナイメージのビルドとプッシュ
+`Dockerfile` を使って、アプリケーションのコンテナイメージをビルドし、Artifact Registryにプッシュします。
 
-Cloud Runが他のGCPサービスと連携するために、必要なAPIを有効化します。
-
+```bash
+# YOUR_GCP_PROJECT_ID を自分のプロジェクトIDに置き換える
+gcloud builds submit --tag asia-northeast1-docker.pkg.dev/[YOUR_GCP_PROJECT_ID]/ep-x-repo/ep-x-backend .
 ```
-gcloud services enable secretmanager.googleapis.com
-gcloud services enable dialogflow.googleapis.com
-gcloud services enable speech.googleapis.com
-gcloud services enable aiplatform.googleapis.com
-```
+このコマンドは、プロジェクトルートにある `Dockerfile` の内容に従って、必要なライブラリのインストールとソースコードのコピーを行い、`ep-x-backend` という名前のコンテナイメージを作成します。
 
-### 1-2. Secret Managerに秘密情報を登録
+### 3. Cloud Run へのデプロイ
+ビルドしたコンテナイメージをCloud Runにデプロイします。
 
-（このプロジェクトでは現在直接のAPIキーは使っていませんが、将来的に必要になった場合の手順です）
-例えば、`SOME_API_KEY`という秘密情報を登録する場合：
-
-```
-# YOUR_SECRET_API_KEYは実際のキーに置き換えてね！
-echo -n "YOUR_SECRET_API_KEY" | gcloud secrets create some-api-secret --data-file=-
-```
-
-## 🚀 2. 二段ロケット方式でビルド！ (Two-Stage Build)
-
-EP-Xは依存ライブラリが多く、ビルドに時間がかかります。そのため、**「時間がかかる土台（baseイメージ）」**と**「一瞬で終わるアプリ本体」**を分離する「二段ロケット方式」を採用します。
-
-### 2-1. 第一段ロケット (土台イメージのビルド)
-
-`requirements.txt`の全ライブラリをインストールした、超頑丈な土台イメージを作成します。この作業は時間がかかるため、ハイスペックマシンを指定します。
-
-```
-# cloudbuild.base.yaml を使って、土台となるイメージをビルド
-gcloud builds submit --config cloudbuild.base.yaml .
-```
-このコマンドは、`cloudbuild.base.yaml`の設定（`machineType: 'N1_HIGHCPU_8'` と `timeout: 3600s`）を読み込んで実行します。ビルドには10分以上かかりますが、気長に待ちましょう。
-
-### 2-2. 第二段ロケット (アプリ本体のビルド)
-
-土台が完成したら、その上にアプリのソースコードを乗せるだけの、一瞬で終わるビルドを実行します。
-
-```
-# cloudbuild.yaml を使って、最終的なアプリケーションイメージをビルド
-gcloud builds submit --config cloudbuild.yaml .
-```
-
-## 🛰️ 3. Cloud Runに発射！ (Deploy to Cloud Run)
-
-全ての準備が整いました。完成したコンテナをCloud Runにデプロイします！
-
-```
-# --set-env-vars で、アプリが必要とする環境変数を渡すのがポイント！
+```bash
+# YOUR_GCP_PROJECT_ID を自分のプロジェクトIDに置き換える
 gcloud run deploy ep-x-backend \
-  --image gcr.io/edge-presence-x-mvp-463704/ep-x-backend:latest \
+  --image asia-northeast1-docker.pkg.dev/[YOUR_GCP_PROJECT_ID]/ep-x-repo/ep-x-backend:latest \
   --platform managed \
   --region asia-northeast1 \
   --allow-unauthenticated \
-  --set-env-vars="VERTEX_AI_PROJECT=edge-presence-x-mvp-463704"
+  --set-env-vars="GCP_PROJECT_ID=[YOUR_GCP_PROJECT_ID]"
 ```
-もしSecret Managerに登録したキーを使う場合は、`--set-secrets`オプションを追加します。
-```
-# 例：
-# --set-secrets="SOME_API_KEY_ENV_NAME=some-api-secret:latest"
+- `--allow-unauthenticated`: フロントエンドから誰でもアクセスできるようにします。
+- `--set-env-vars`: アプリケーション内でGCPのプロジェクトIDを参照できるように環境変数を設定します。
+
+これでバックエンドのデプロイは完了です！🎉
+
+---
+
+## 🚀 Part 2: フロントエンド (Firebase Hosting) のデプロイ
+
+フロントエンドのVue.jsアプリケーションは、Firebase Hostingにデプロイします。
+**警告:** ここの設定は非常に複雑で、多くの罠があります。必ずこの手順通りに進めてください。
+
+### 0. 前提条件
+- `node` と `npm` がインストールされていること。
+- `firebase-tools` がグローバルにインストールされていること。
+  ```bash
+  npm install -g firebase-tools
+  ```
+- Firebaseプロジェクトが作成済みで、Hostingが有効になっていること。
+
+### 1. Firebase プロジェクトとの連携
+ローカル環境をFirebaseプロジェクトに接続します。
+
+```bash
+# プロジェクトのルートディレクトリで実行
+firebase login
+firebase use [YOUR_FIREBASE_PROJECT_ID]
 ```
 
-これでデプロイは完了です！お疲れ様でした！✨ 
+### 2. ビルド設定の最終調整 (最重要！)
+Firebase CLIが正しくファイルを認識できるように、Viteのビルド設定とプロジェクトの構成を調整します。これが最も重要なステップです。
+
+1.  **`vite.config.ts` の設定**
+    - プロジェクトのルートにある `vite.config.ts` の中身を以下のように設定し、**ビルドの起点(`root`)**と**出力先(`outDir`)**を明確に指定します。
+
+    ```ts
+    // vite.config.ts
+    import { defineConfig } from 'vite';
+    import vue from '@vitejs/plugin-vue';
+    import vuetify from 'vite-plugin-vuetify';
+    import path from 'path';
+
+    export default defineConfig({
+      root: path.resolve(__dirname, 'src/frontend'), // ビルドの起点を指定
+      plugins: [ /* ... */ ],
+      build: {
+        // 出力先をプロジェクトルートの 'dist' に指定
+        outDir: path.resolve(__dirname, 'dist'),
+        emptyOutDir: true,
+      },
+      // ... その他の設定
+    });
+    ```
+
+2.  **`index.html` の移動と修正**
+    - プロジェクトのルートにあった `index.html` を `src/frontend/` フォルダに移動します。
+    - `src/frontend/index.html` が読み込むスクリプトのパスを、相対パスに修正します。
+    ```html
+    <!-- src/frontend/index.html -->
+    <script type="module" src="./main.ts"></script>
+    ```
+
+### 3. ビルドとデプロイ
+すべての設定が完了したら、ビルドとデプロイを実行します。**必ずプロジェクトのルートディレクトリで実行してください。**
+
+1.  **依存関係のインストール**
+    ```bash
+    npm install
+    ```
+
+2.  **フロントエンドのビルド**
+    ```bash
+    npm run build
+    ```
+    これにより、プロジェクトのルートに `dist` フォルダが作成されます。
+
+3.  **Firebaseへのデプロイ**
+    ```bash
+    firebase deploy --only hosting
+    ```
+
+これでフロントエンドのデプロイも完了です！お疲れ様でした！✨ 
