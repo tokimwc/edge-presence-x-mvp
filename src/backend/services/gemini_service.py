@@ -192,58 +192,41 @@ class GeminiService:
     """
     def __init__(self):
         """
-        コンストラクタ。設定を読み込んで、必要なモデルを全部初期化しちゃう。
+        コンストラクタ。Vertex AIの初期化とモデルのロードをここで行う。
         """
         self.gemini_model_instance = None
         self.deepeval_model_instance = None
         self.gemini_config = {}
         self.star_metrics = {}
-        # VertexAIクラスのインスタンスに設定を渡せるように保持
-        self.generation_config_for_deepeval = {}
-        self.safety_settings_for_deepeval = {}
-        self._load_config_and_init_models()
-
-    def _load_config_and_init_models(self):
-        """
-        設定ファイルからGeminiの情報を読み込んで、モデルを初期化する内部メソッド。
-        コンストラクタから呼ばれるよ。
-        """
         try:
-            if not os.path.exists(GEMINI_CONFIG_PATH):
-                logger.error(f"Gemini設定ファイルが見つかりません: {GEMINI_CONFIG_PATH}")
-                return
+            if os.path.exists(GEMINI_CONFIG_PATH):
+                with open(GEMINI_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                    self.gemini_config = json.load(f)
+                logger.info(f"Gemini設定ファイルを読み込みました: {GEMINI_CONFIG_PATH}")
 
-            with open(GEMINI_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                self.gemini_config = json.load(f)
-            logger.info(f"Gemini設定ファイルを読み込みました: {GEMINI_CONFIG_PATH}")
+            # 環境変数または設定ファイルから値を取得
+            project_id = os.getenv("GOOGLE_CLOUD_PROJECT") or self.gemini_config.get("project_id")
+            location = self.gemini_config.get("location", "us-central1") # 推奨リージョン
+            model_name = self.gemini_config.get("model_name", "gemini-1.5-flash-002") # 公式モデル名
 
-            project_id = self.gemini_config.get("project_id")
-            location = self.gemini_config.get("location")
-            if not project_id or not location:
-                logger.error("Gemini設定ファイルに 'project_id' または 'location' が指定されていません。")
-                return
-            
+            if not project_id:
+                raise ValueError("GCPプロジェクトIDが設定されていません。")
+
+            # Vertex AIを正しく初期化
             vertexai.init(project=project_id, location=location)
             
-            model_name = self.gemini_config.get("model_name", "gemini-1.5-flash-001")
+            # 生成モデルをインスタンス化
             self.gemini_model_instance = GenerativeModel(model_name)
-            
-            # DeepEval用の設定をインスタンス変数に保存
-            self.generation_config_for_deepeval = self.gemini_config.get("generation_config", {})
-            self.safety_settings_for_deepeval = self.gemini_config.get("safety_settings", {})
+            logger.info(f"✅ Vertex AI Geminiモデル ({model_name} in {location}) の準備ができました。")
 
-            # DeepEval用のラッパーインスタンスもここで作っちゃう
+            # DeepEval関連の初期化
             self.deepeval_model_instance = VertexAI(project=project_id, location=location, model_name=model_name)
-            # ラッパーインスタンスにも設定を渡しておく
-            self.deepeval_model_instance.generation_config = self.generation_config_for_deepeval
-            self.deepeval_model_instance.safety_settings = self.safety_settings_for_deepeval
-
-            logger.info(f"✅ Geminiモデル ({model_name}) とDeepEvalラッパーの準備ができました。")
             self._initialize_deepeval_metrics()
 
         except Exception as e:
-            logger.error(f"😱 Geminiモデルの初期化中に致命的なエラーが発生: {e}", exc_info=True)
-
+            logger.error(f"❌ Vertex AI Gemini の初期化中に致命的なエラー: {e}", exc_info=True)
+            # アプリケーションが起動しないように例外を再送出
+            raise
 
     def _initialize_deepeval_metrics(self):
         """
@@ -290,42 +273,27 @@ class GeminiService:
     @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3))
     async def generate_structured_feedback(self, evaluation_context: dict) -> dict:
         """
-        入力情報から、STARメソッドに基づいた構造化されたフィードバックを非同期で生成するよ。
-        リトライ処理も入れて、APIエラーに強くしてある！
+        【再修正】Vertex AI Gemini API を使ってフィードバックを生成する。
         """
         if not self.gemini_model_instance:
-            logger.error("Geminiモデルが初期化されていません。フィードバックを生成できません。")
-            return {"error": "Gemini model not initialized"}
+            logger.error("Vertex AIモデルが初期化されていません。フィードバックを生成できません。")
+            return {"error": "Vertex AI model not initialized"}
 
         prompt = PROMPT_TEMPLATE.format(**evaluation_context)
-        logger.info("Geminiにフィードバック生成をリクエストします。")
+        logger.info("Vertex AI Gemini APIにフィードバック生成をリクエストします。")
         
         try:
-            response = await self.gemini_model_instance.generate_content_async(
-                [prompt],
-                generation_config=self.gemini_config.get("generation_config", {}),
-                safety_settings=self.gemini_config.get("safety_settings", {})
-            )
+            # 正しいVertex AI SDKの非同期呼び出し
+            response = await self.gemini_model_instance.generate_content_async(prompt)
             
-            logger.info("Geminiからのレスポンスを受信しました。")
+            logger.info("Vertex AI Gemini APIからのレスポンスを受信しました。")
             
-            # パース処理を呼び出す
             parsed_data = self._parse_gemini_response_data(response.text)
-            
-            # deepevalは開発/評価時のみ有効化するなど、条件分岐を入れると良さそう
-            # if os.getenv("ENABLE_DEEPEVAL", "false").lower() == "true":
-            #     if parsed_data and "star_evaluation" in parsed_data:
-            #         deepeval_results = await self._evaluate_with_deepeval(evaluation_context, parsed_data)
-            #         parsed_data['deepeval_results'] = deepeval_results
-
             return parsed_data
 
-        except google_exceptions.ResourceExhausted as e:
-            logger.error(f"リソース上限超過エラー: {e}")
-            raise  # 再試行のために例外を再度送出
         except Exception as e:
-            logger.error(f"Geminiフィードバック生成中に予期せぬエラー: {e}", exc_info=True)
-            return {"error": f"An unexpected error occurred: {e}"}
+            logger.error(f"Vertex AI Gemini APIでのフィードバック生成中にエラー: {e}", exc_info=True)
+            return {"error": f"An unexpected error occurred with Vertex AI Gemini API: {e}"}
 
     async def _evaluate_with_deepeval(self, context: dict, llm_output: dict) -> dict:
         """

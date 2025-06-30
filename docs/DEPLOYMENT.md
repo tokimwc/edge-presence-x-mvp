@@ -24,28 +24,37 @@
 2.  ダウンロードしたキーを、プロジェクトの `config` フォルダに `gcp-key.json` という名前で配置します。
 
 ### 2. コンテナイメージのビルドとプッシュ
-`Dockerfile` を使って、アプリケーションのコンテナイメージをビルドし、Artifact Registryにプッシュします。
+`Dockerfile` を使って、アプリケーションのコンテナイメージをビルドし、Google Container Registry (GCR) にプッシュします。
 
-```bash
-# YOUR_GCP_PROJECT_ID を自分のプロジェクトIDに置き換える
-gcloud builds submit --tag asia-northeast1-docker.pkg.dev/[YOUR_GCP_PROJECT_ID]/ep-x-repo/ep-x-backend .
+```powershell
+# まずはDockerイメージをビルドするよ！
+docker build -t gcr.io/edge-presence-x-mvp-463704/ep-x-backend .
+
+# 次に、ビルドしたイメージをGCRにプッシュ！
+docker push gcr.io/edge-presence-x-mvp-463704/ep-x-backend
 ```
-このコマンドは、プロジェクトルートにある `Dockerfile` の内容に従って、必要なライブラリのインストールとソースコードのコピーを行い、`ep-x-backend` という名前のコンテナイメージを作成します。
+このコマンドは、プロジェクトルートにある `Dockerfile` の内容に従って、`ep-x-backend` という名前のコンテナイメージを作成・プッシュします。
 
 ### 3. Cloud Run へのデプロイ
 ビルドしたコンテナイメージをCloud Runにデプロイします。
+**⚡注意:** 以下のコマンドはPowerShell用だよ！各行の末尾にあるバッククォート(\`)は、コマンドが次の行に続くことを示す記号だから、消さないでね！
 
-```bash
-# YOUR_GCP_PROJECT_ID を自分のプロジェクトIDに置き換える
-gcloud run deploy ep-x-backend \
-  --image asia-northeast1-docker.pkg.dev/[YOUR_GCP_PROJECT_ID]/ep-x-repo/ep-x-backend:latest \
-  --platform managed \
-  --region asia-northeast1 \
-  --allow-unauthenticated \
-  --set-env-vars="GCP_PROJECT_ID=[YOUR_GCP_PROJECT_ID]"
+```powershell
+# PowerShellを使ってCloud Runにデプロイ
+gcloud run deploy ep-x-backend `
+  --image gcr.io/edge-presence-x-mvp-463704/ep-x-backend `
+  --platform managed `
+  --region asia-northeast1 `
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=edge-presence-x-mvp-463704" `
+  --set-env-vars "GOOGLE_APPLICATION_CREDENTIALS=/app/config/gcp-key.json" `
+  --allow-unauthenticated `
+  --memory 2Gi `
+  --cpu 2 `
+  --timeout 300s
 ```
 - `--allow-unauthenticated`: フロントエンドから誰でもアクセスできるようにします。
-- `--set-env-vars`: アプリケーション内でGCPのプロジェクトIDを参照できるように環境変数を設定します。
+- `--set-env-vars`: アプリケーション内で必要な環境変数を設定します。
+- `--memory`, `--cpu`, `--timeout`: パフォーマンス向上のためのおまじない✨
 
 これでバックエンドのデプロイは完了です！🎉
 

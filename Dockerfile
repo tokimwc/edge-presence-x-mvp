@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # せんぱい、ここがマジで重要！設定ファイルを全部コンテナにコピーするよ！📝
 # これで gemini_config.json も gcp-key.json も確実に入る！
-COPY ./config ./config
+COPY config/ /app/config/
 
 # アプリのソースコードを全部コピー
 COPY ./src ./src
